@@ -1,0 +1,13 @@
+[package]
+name = "Eisen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Eisen is a simple application/game engine"
+homepage = "https://github.com/Ipotrick/Eisen"
+repository = "https://github.com/Ipotrick/Eisen"
+readme = "Eisen is a simple application/game engine"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
