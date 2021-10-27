@@ -3,9 +3,9 @@ name = "eisen"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Eisen is a simple application/game engine"
-homepage = "https://github.com/Ipotrick/Eisen"
-repository = "https://github.com/Ipotrick/Eisen"
+description = "eisen is a simple application/game engine"
+homepage = "https://github.com/Ipotrick/eisen"
+repository = "https://github.com/Ipotrick/eisen"
 readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
