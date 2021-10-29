@@ -302,25 +302,6 @@ impl Runtime {
     pub fn exec(&self, closure: impl Fn() + Send + 'static) {
         self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(smallbox::smallbox!(closure))).unwrap();
     }
-
-    #[allow(unused)]
-    pub fn block_on(&self, mut future: impl Future<Output = ()> + Send + Sync + 'static) {
-        let futur_ref = &future;
-        let (snd,rcv) = crossbeam_channel::unbounded::<bool>();
-        snd.send( true ).unwrap();
-
-        let waker = Arc::new(BlockedThreadWaker{snd:snd});
-        let waker = waker_ref(&waker);
-        let context = &mut Context::from_waker(&*waker);
-
-        loop {
-            let _ = rcv.recv().unwrap();
-            let future = unsafe{ Pin::new_unchecked(&mut future)};
-            if future.poll(context) != Poll::Pending {
-                break;
-            }
-        }
-    }
 }
 
 impl Drop for Runtime {
@@ -331,6 +312,25 @@ impl Drop for Runtime {
 
         while let Some(joinhandle) = self.worker_joins.pop() {
             let _ = joinhandle.join();
+        }
+    }
+}
+
+#[allow(unused)]
+pub fn block_on<Out>(mut future: impl Future<Output = Out>) -> Out {
+    let (snd,rcv) = crossbeam_channel::unbounded::<bool>();
+    snd.send( true ).unwrap();
+
+    let waker = Arc::new(BlockedThreadWaker{snd:snd});
+    let waker = waker_ref(&waker);
+    let context = &mut Context::from_waker(&*waker);
+
+    loop {
+        let _ = rcv.recv().unwrap();
+        let future = unsafe{ Pin::new_unchecked(&mut future)};
+        match future.poll(context) {
+            Poll::Ready(val) => break val,
+            Poll::Pending => {}
         }
     }
 }
