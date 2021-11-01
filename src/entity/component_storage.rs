@@ -41,7 +41,7 @@ pub trait ComponentStore<T: Default + Clone> {
     fn add(&mut self, index: EntityIndex, value: T);
 }
 
-const PAGE_EXPONENT: usize = 4;
+const PAGE_EXPONENT: usize = 7;
 const PAGE_SIZE: usize = 1 << PAGE_EXPONENT;
 const PAGE_MASK: usize = get_page_mask(PAGE_EXPONENT);
 
@@ -160,6 +160,36 @@ impl<T: Default + Clone> LinearStore<T> {
             .flat_map(|(page_index, page)| page.iter_entity_mut(page_index))
     }
 
+    #[allow(unused)]
+    pub fn iter_entity_batch(&self, batch_size: usize) -> Vec<impl Iterator<Item = (EntityIndex, &T)>> {
+        let mut vec = Vec::new();
+        
+        let n = self.pages.len();
+
+        for page_index in 0..n {
+            vec.push(self.pages[page_index].iter_entity(page_index).take(PAGE_SIZE));
+        }
+        vec
+    }
+
+    #[allow(unused)]
+    pub fn iter_entity_mut_batch(&mut self, batch_size: usize) -> Vec<impl Iterator<Item = (EntityIndex, &mut T)>> {
+        let mut vec = Vec::new();
+        
+        fn forget_lifetime_mut<'a, 'b, T>(reference: &'a mut T) -> &'b mut T {
+            let ptr = reference as *mut T;
+            unsafe{&mut*ptr} 
+        }
+
+        let n = self.pages.len();
+
+        for page_index in 0..n {
+            let forgotten_self = unsafe{std::mem::transmute::<&mut Self, &mut Self>(self)};
+            vec.push(forgotten_self.pages[page_index].iter_entity_mut(page_index).take(PAGE_SIZE));
+        }
+        vec
+    }
+
     fn assure_page(&mut self, page_index: usize) {
         if self.pages.len() <= page_index {
             self.pages.resize(page_index + 1, Page::new());
@@ -266,13 +296,39 @@ impl<T: Default + Clone> DenseStore<T> {
     }
 
     #[allow(unused)]
-    pub fn iter_entity(&self) -> impl Iterator<Item = (&EntityIndex, &T)> {
-        self.dense_indices.iter().zip(self.dense_values.iter())
+    pub fn iter_entity(&self) -> impl Iterator<Item = (EntityIndex, &T)> {
+        self.dense_indices.iter().map(|i|*i).zip(self.dense_values.iter())
     }
     
     #[allow(unused)]
-    pub fn iter_entity_mut(&mut self) -> impl Iterator<Item = (&EntityIndex, &mut T)> {
-        self.dense_indices.iter().zip(self.dense_values.iter_mut())
+    pub fn iter_entity_mut(&mut self) -> impl Iterator<Item = (EntityIndex, &mut T)> {
+        self.dense_indices.iter().map(|i|*i).zip(self.dense_values.iter_mut())
+    }
+
+    #[allow(unused)]
+    pub fn iter_entity_batch(&self, batch_size: usize) -> Vec<impl Iterator<Item = (EntityIndex, &T)>> {
+        let mut vec = Vec::new();
+        
+        let n = self.dense_indices.len();
+
+        for start in (0..n).step_by(batch_size) {
+            println!("start is at: {}", start);
+            vec.push(self.dense_indices[start..].iter().map(|i| *i).take(batch_size).zip(self.dense_values[start..].iter().take(batch_size)));
+        }
+        vec
+    }
+
+    #[allow(unused)]
+    pub fn iter_entity_mut_batch(&mut self, batch_size: usize) -> Vec<impl Iterator<Item = (EntityIndex, &mut T)>> {
+        let mut vec = Vec::new();
+
+        let n = self.dense_indices.len();
+
+        for start in (0..n).step_by(batch_size) {
+            let forgotten_self = unsafe{std::mem::transmute::<&mut Self, &mut Self>(self)};
+            vec.push(forgotten_self.dense_indices[start..].iter().map(|i| *i).take(batch_size).zip(forgotten_self.dense_values[start..].iter_mut().take(batch_size)));
+        }
+        vec
     }
 
     fn assure_index(&mut self, index: EntityIndex) {
@@ -399,7 +455,7 @@ impl<T: 'static + Default + Clone> ComponentStoreAccessor for Arc<RwLock<DenseSt
     }
 }
 
-pub trait Component : Clone + Default
+pub trait Component : Clone + Default + Sync + Send
 {
     type Storage : ComponentStore<Self>;
 }

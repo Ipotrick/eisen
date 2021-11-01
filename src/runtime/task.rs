@@ -13,8 +13,8 @@ pub use {
 };
 
 
-type TaskFutureBox = Pin<SmallBox<dyn Future<Output = ()> + Send + Sync, smallbox::space::S8>>;
-type ClosureBox = SmallBox<dyn Fn() + Send, smallbox::space::S8>;
+type TaskFutureBox = Pin<Box<dyn Future<Output = ()> + Send + Sync>>;
+type ClosureBox = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone,Copy)]
 pub enum Priority {
@@ -29,27 +29,23 @@ pub enum Priority {
 }
 
 pub struct Task {
-    pub future: TaskFutureBox,
+    pub future: Mutex<TaskFutureBox>,
     pub execution_sender: crossbeam_channel::Sender<ExecutionOrder>,
     pub priority: Priority,
 }
 
-pub struct TaskWrapper {
-    pub task: Mutex<Option<Task>>,
-}
-
 pub enum ExecutionOrder {
-    ExecuteTask(Arc<TaskWrapper>),
+    ExecuteTask(Arc<Task>),
     ExecuteClosure(ClosureBox),
     Die,
 }
 
-impl ArcWake for TaskWrapper {
+impl ArcWake for Task {
     fn wake(self: Arc<Self>) {
-        self.task.lock().unwrap().as_ref().unwrap().execution_sender.send(ExecutionOrder::ExecuteTask(self.clone())).unwrap();
+        self.execution_sender.send(ExecutionOrder::ExecuteTask(self.clone())).unwrap();
     }
 
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.task.lock().unwrap().as_ref().unwrap().execution_sender.send(ExecutionOrder::ExecuteTask(arc_self.clone())).unwrap();
+        arc_self.execution_sender.send(ExecutionOrder::ExecuteTask(arc_self.clone())).unwrap();
     }
 }

@@ -15,7 +15,6 @@ pub use {
 pub mod task;
 use task::Task;
 use task::ExecutionOrder;
-use task::TaskWrapper;
 
 struct BlockedThreadWaker{
     snd: crossbeam_channel::Sender<bool>,
@@ -40,45 +39,23 @@ struct RuntimeMeta {
     execution_reciever_normal: crossbeam_channel::Receiver<ExecutionOrder>,
     execution_reciever_high: crossbeam_channel::Receiver<ExecutionOrder>,
     execution_reciever_very_high: crossbeam_channel::Receiver<ExecutionOrder>,
-    task_recycling_sender: crossbeam_channel::Sender<Arc<TaskWrapper>>,
-    task_recycling_reciever: crossbeam_channel::Receiver<Arc<TaskWrapper>>,
     // sorted in reverse order of wake up time. Last Element will wake up first
-    sleepers: Mutex<Vec<SleepingTask>>,
+    new_sleepers_snd: async_std::channel::Sender<SleepingTask>,
+    end_program: std::sync::atomic::AtomicBool,
 }
 
 #[allow(unused)]
-fn process_task(meta: &Arc<RuntimeMeta>, execution_sender: &crossbeam_channel::Sender<ExecutionOrder>, recycling_sender: &crossbeam_channel::Sender<Arc<TaskWrapper>>, task_wrapper: Arc<TaskWrapper>) {
+fn process_task(meta: &Arc<RuntimeMeta>, execution_sender: &crossbeam_channel::Sender<ExecutionOrder>, task: Arc<Task>) {
     let task_finished = {
-        let waker = waker_ref(&task_wrapper);
+        let waker = waker_ref(&task);
         let context = &mut Context::from_waker(&*waker);
-
-        CURRENT_RUNTIME_META.with(|f|{
-            *f.borrow_mut() = Some(meta.clone());
-        });
     
-        let finished = Poll::Pending != task_wrapper.task.lock()
+        let finished = Poll::Pending != task.future.lock()
             .unwrap()
             .as_mut()
-            .unwrap()
-            .future.as_mut()
             .poll(context);
-
-            CURRENT_RUNTIME_META.with(|f|{
-            *f.borrow_mut() = None;
-        });
-
         finished
     };
-
-    if task_finished {
-        *task_wrapper.task.lock().unwrap() = None;
-        if Arc::strong_count(&task_wrapper) == 1 /* we can only recycle it if we have the last reference to the wrapper */ {
-            recycling_sender.send(task_wrapper).unwrap();
-        }
-    } else if Arc::strong_count(&task_wrapper) == 1 {
-        // if the task is not finished and there is no references to wake the task later, we just requeue the task immediately
-        execution_sender.send(ExecutionOrder::ExecuteTask(task_wrapper)).unwrap();
-    }
 }
 
 #[allow(unused)]
@@ -90,23 +67,14 @@ fn worker(meta: Arc<RuntimeMeta>, _worker_index: usize) {
             recv(meta.execution_reciever_normal) -> order => (&meta.execution_sender_normal, order.unwrap()),
             recv(meta.execution_reciever_high) -> order => (&meta.execution_sender_high, order.unwrap()),
             recv(meta.execution_reciever_very_high) -> order => (&meta.execution_sender_very_high, order.unwrap()),
-            default(std::time::Duration::from_millis(10)) => {
-                if let Ok(mut sleepers) = meta.sleepers.try_lock() {
-                    while !sleepers.is_empty() && sleepers.last().unwrap().wake_up_time <= std::time::Instant::now() {
-                        let sleeper = sleepers.pop().unwrap();
-                        sleeper.waker.wake_by_ref();
-                    }
-                }
-                continue 'outer;
-            }
         };
 
         'inner: loop {
             match order {
-                ExecutionOrder::ExecuteTask(task) => { 
-                    process_task(&meta, sender, &meta.task_recycling_sender, task);
+                ExecutionOrder::ExecuteTask(task) => {
+                    process_task(&meta, sender, task);
                 },
-                ExecutionOrder::ExecuteClosure(closure) => {
+                ExecutionOrder::ExecuteClosure(mut closure) => {
                     closure();
                 },
                 ExecutionOrder::Die => break 'outer,
@@ -141,11 +109,12 @@ pub struct Runtime {
     worker_joins: Vec<std::thread::JoinHandle<()>>,
 }
 
-thread_local! {
-    static CURRENT_RUNTIME_META: RefCell<Option<Arc<RuntimeMeta>>> = RefCell::new(None);
-}
+const SLEEP_SPIN_TIME: std::time::Duration = std::time::Duration::from_micros(100);
+
 struct SleepFuture {
+    called_once: bool,
     wake_up_time: std::time::Instant,
+    sender: async_std::channel::Sender<SleepingTask>,
 }
 
 struct SleepingTask {
@@ -155,43 +124,76 @@ struct SleepingTask {
 
 impl Future for SleepFuture {
     type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.wake_up_time < std::time::Instant::now() {
-            Poll::Ready(())
-        } else {
-            CURRENT_RUNTIME_META.with(|f|{
-                let mut gf = f
-                .borrow_mut();
-                let mut g = gf
-                .as_mut()
-                .unwrap().sleepers
-                .lock()
-                .unwrap();
-
-                // insert, so that the shorter waittimes are at the end of the vec
-                let insertion_index = {
-                    let mut index = g.len();
-                    loop {
-                        if index == 0 || g[index-1].wake_up_time > self.wake_up_time {
-                            break;
-                        }
-                        index -= 1;
-                    }
-                    index
-                };
-
-                g.insert(insertion_index, SleepingTask{waker: cx.waker().clone(), wake_up_time: self.wake_up_time});
-            });
-            Poll::Pending
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.called_once && std::time::Instant::now() + SLEEP_SPIN_TIME > self.wake_up_time {
+            while std::time::Instant::now() < self.wake_up_time {}
+            return Poll::Ready(());
         }
+        self.called_once = true;
+        while self.sender.try_send(SleepingTask{waker: cx.waker().clone(), wake_up_time: self.wake_up_time}).is_err() {}
+        Poll::Pending
     }
 }
 
 #[allow(unused)]
-pub async fn sleep_for_task(min_dura: std::time::Duration) {
-    let sleeper = SleepFuture{wake_up_time: std::time::Instant::now() + min_dura};
-    sleeper.await;
+pub async fn sleep_for(runtime: &Runtime, min_dura: std::time::Duration) {
+    let wake_up_time = std::time::Instant::now() + min_dura;
+    let sleeper = SleepFuture{
+        called_once: false,
+        wake_up_time: wake_up_time,
+        sender: runtime.meta.new_sleepers_snd.clone(),
+    };
 
+    sleeper.await;
+}
+
+struct YieldFuture {
+    yielded_once: bool,
+}
+
+impl Future for YieldFuture {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded_once {
+            return Poll::Ready(());
+        } 
+        self.yielded_once = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+#[allow(unused)]
+pub async fn yield_now() {
+    YieldFuture{yielded_once:false}.await;
+}
+
+async fn sleep_sheduler(sleepers_rcv: async_std::channel::Receiver<SleepingTask>) {
+    let mut sleepers = Vec::new();
+    loop {
+        if sleepers.is_empty() {
+            let sleeper = sleepers_rcv.recv().await.unwrap();
+            sleepers.push(sleeper);
+        }
+
+        while let Ok(new_sleeper) = sleepers_rcv.try_recv() {
+            let insertion_index = sleepers.partition_point(|other_st: &SleepingTask| other_st.wake_up_time > new_sleeper.wake_up_time);
+            sleepers.insert(insertion_index, new_sleeper);
+        }
+
+        'search: loop {
+            if sleepers.is_empty() { break 'search; }
+
+            if (std::time::Instant::now() + SLEEP_SPIN_TIME) > sleepers.last().unwrap().wake_up_time {
+                let sleeper = sleepers.pop().unwrap();
+                sleeper.waker.wake_by_ref();
+            } else {
+                break 'search;
+            }
+        }
+
+        yield_now().await;
+    }
 }
 
 impl Runtime {
@@ -201,9 +203,9 @@ impl Runtime {
         let (s_normal, r_normal) = crossbeam_channel::unbounded();
         let (s_high, r_high) = crossbeam_channel::unbounded();
         let (s_very_high, r_very_high) = crossbeam_channel::unbounded();
-        let (recycle_s, recycle_r) = crossbeam_channel::unbounded();
+        let (sleepers_snd, sleepers_rcv) = async_std::channel::unbounded();
 
-        let meta = Arc::new(RuntimeMeta{ 
+        let mut meta = Arc::new(RuntimeMeta{ 
             execution_sender_low:           s_low,
             execution_sender_normal:        s_normal,
             execution_sender_high:          s_high,
@@ -212,9 +214,8 @@ impl Runtime {
             execution_reciever_normal:      r_normal,
             execution_reciever_high:        r_high,
             execution_reciever_very_high:   r_very_high,
-            task_recycling_reciever:        recycle_r,
-            task_recycling_sender:          recycle_s,
-            sleepers: Mutex::new(Vec::new())
+            new_sleepers_snd:               sleepers_snd,
+            end_program:    	            std::sync::atomic::AtomicBool::from(false),
         });
 
         let worker_thread_count = usize::max(1,num_cpus::get_physical() - 1);
@@ -228,59 +229,32 @@ impl Runtime {
             worker_join_handles.push(std::thread::spawn(move || { worker(meta, idx); }));
         }
 
-        Self {
+        let ret = Self {
             meta: meta,
             worker_joins: worker_join_handles,
-        }
-    }
+        };
 
-    #[allow(unused)]
-    fn make_task(&self, future: impl Future<Output = ()> + Send + Sync + 'static, priority: task::Priority, sender: &crossbeam_channel::Sender<ExecutionOrder>) -> Arc<TaskWrapper> {
-        match self.meta.task_recycling_reciever.try_recv() {
-            Ok(rcv) => {
-                {
-                    assert_eq!(Arc::strong_count(&rcv), 1);
-                    let g = &mut *rcv.task.lock().unwrap();
-                    assert!(g.is_none());
-                    *g = Some(
-                        Task{
-                            execution_sender: sender.clone(),
-                            future: unsafe{Pin::new_unchecked(smallbox::smallbox!(future))},
-                            priority: priority,
-                        }
-                    );
-                }
-                rcv
-            },
-            Err(_) => Arc::new(TaskWrapper{
-                task: Mutex::new(Some(Task{
-                    future: unsafe{Pin::new_unchecked(smallbox::smallbox!(future))}, 
-                    execution_sender: sender.clone(),
-                    priority: priority,
-                })) 
-            })
-        }
+        ret.spawn_prioritised(sleep_sheduler(sleepers_rcv), task::Priority::Low);
+
+        ret
     }
 
     #[allow(unused)]
     pub fn spawn_prioritised(&self, future: impl Future<Output = ()> + Send + Sync + 'static, priority: task::Priority) {
-        let task_arc = self.make_task(
-            future, 
-            priority, 
-            match priority {
-                task::Priority::Low => &self.meta.execution_sender_low,
-                task::Priority::Normal => &self.meta.execution_sender_normal,
-                task::Priority::High => &self.meta.execution_sender_high,
-                task::Priority::VeryHigh => &self.meta.execution_sender_very_high,
-            }
-        );
+        let sender = match priority {
+            task::Priority::Low => &self.meta.execution_sender_low,
+            task::Priority::Normal => &self.meta.execution_sender_normal,
+            task::Priority::High => &self.meta.execution_sender_high,
+            task::Priority::VeryHigh => &self.meta.execution_sender_very_high,
+        };
 
-        match priority {
-            task::Priority::Low => self.meta.execution_sender_low.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap(),
-            task::Priority::Normal => self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap(),
-            task::Priority::High => self.meta.execution_sender_high.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap(),
-            task::Priority::VeryHigh => self.meta.execution_sender_very_high.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap(),
-        }
+        let task_arc = Arc::new(Task{
+            future: Mutex::new(Box::pin(future)),
+            execution_sender: sender.clone(),
+            priority: priority,
+        });
+
+        sender.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap();
     }
 
     #[allow(unused)]
@@ -289,23 +263,25 @@ impl Runtime {
     }
 
     #[allow(unused)]
-    pub fn exec_prioritised(&self, closure: impl Fn() + Send + 'static, priority: task::Priority) {
+    pub fn exec_prioritised(&self, closure: impl FnOnce() + Send + 'static, priority: task::Priority) {
         match priority {
-            task::Priority::Low => self.meta.execution_sender_low.send(ExecutionOrder::ExecuteClosure(smallbox::smallbox!(closure))).unwrap(),
-            task::Priority::Normal => self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(smallbox::smallbox!(closure))).unwrap(),
-            task::Priority::High => self.meta.execution_sender_high.send(ExecutionOrder::ExecuteClosure(smallbox::smallbox!(closure))).unwrap(),
-            task::Priority::VeryHigh => self.meta.execution_sender_very_high.send(ExecutionOrder::ExecuteClosure(smallbox::smallbox!(closure))).unwrap(),
+            task::Priority::Low => self.meta.execution_sender_low.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap(),
+            task::Priority::Normal => self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap(),
+            task::Priority::High => self.meta.execution_sender_high.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap(),
+            task::Priority::VeryHigh => self.meta.execution_sender_very_high.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap(),
         }
     }
     
     #[allow(unused)]
-    pub fn exec(&self, closure: impl Fn() + Send + 'static) {
-        self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(smallbox::smallbox!(closure))).unwrap();
+    pub fn exec(&self, closure: impl FnOnce() + Send + 'static) {
+        self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap();
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        self.meta.end_program.fetch_or(true, std::sync::atomic::Ordering::Relaxed);
+
         for _ in 0..self.worker_joins.len() {
             self.meta.execution_sender_normal.send(ExecutionOrder::Die).unwrap();
         }
@@ -328,9 +304,8 @@ pub fn block_on<Out>(mut future: impl Future<Output = Out>) -> Out {
     loop {
         let _ = rcv.recv().unwrap();
         let future = unsafe{ Pin::new_unchecked(&mut future)};
-        match future.poll(context) {
-            Poll::Ready(val) => break val,
-            Poll::Pending => {}
+        if let Poll::Ready(val) = future.poll(context) {
+            break val;
         }
     }
 }

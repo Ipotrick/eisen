@@ -2,6 +2,7 @@ pub mod runtime;
 pub mod sync;
 pub mod entity;
 pub mod util;
+pub mod app;
 
 #[allow(unused)]
 use runtime::*;
@@ -11,68 +12,106 @@ use sync::*;
 use entity::{DenseStore,EntityHandle, GenericComponentStore, ComponentStore};
 #[allow(unused)]
 use util::*;
-
-#[derive(Clone,Default)]
-struct Health(u32);
-
-impl entity::Component for Health {
-    type Storage = entity::DenseStore<Self>;
-} 
-
-#[derive(Clone,Default)]
-struct Pos(f32,f32);
-
-impl entity::Component for Pos {
-    type Storage = entity::DenseStore<Self>;
-}
-
-#[derive(Clone,Default)]
-struct Name(String);
-
-impl entity::Component for Name {
-    type Storage = entity::DenseStore<Self>;
-}
+#[allow(unused)]
+use app::*;
 
 #[cfg(test)]
 mod tests {
+
+    #[allow(unused)]
+    use crate::entity::{EntityComponentManager};
+
     use super::*;
 
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    #[derive(Clone,Default)]
+    struct Health(u32);
+    
+    impl entity::Component for Health {
+        type Storage = entity::DenseStore<Self>;
+    } 
+    
+    #[derive(Clone,Default)]
+    struct Pos(f32,f32);
+    
+    impl entity::Component for Pos {
+        type Storage = entity::DenseStore<Self>;
+    }
+    
+    #[derive(Clone,Default)]
+    struct Name(String);
+    
+    impl entity::Component for Name {
+        type Storage = entity::DenseStore<Self>;
+    }
+
+    struct MyUser {
+
+    }
+
+    impl User for MyUser {
+        fn init(self: Arc<Self>, _: Arc<AppMeta>) { println!("user init!"); }
+        fn cleanup(self: Arc<Self>, _: Arc<AppMeta>)  { println!("user cleanup!"); }
+        fn vary_tick(self: Arc<Self>, _: Arc<AppMeta>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{/*println!("user vary_tick!");*/}) }
+        fn fixed_tick(self: Arc<Self>, _: Arc<AppMeta>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{/*println!("user fixed_tick!");*/}) }
     }
 
     #[test]
-    fn ecm_not_works() {
+    fn dev() {
+        let my_user = MyUser{};
+        let app = Application::new(my_user);
+        app.run();
+    }
+
+    #[test]
+    fn ecm_par_iter_works() {
+        let runntime = Runtime::new();
         let mut ecm = entity::EntityComponentManager::new();
         ecm.register_component::<Health>();
         ecm.register_component::<Pos>();
         ecm.register_component::<Name>();
-
+ 
         let mut healths = block_on(ecm.get_store_mut::<Health>());
         let healths = &mut*healths;
         let mut positions = block_on(ecm.get_store_mut::<Pos>());
         let positions = &mut*positions;
         let mut names = block_on(ecm.get_store_mut::<Name>());
         let names = &mut*names;
-        let mut entities = block_on(ecm.get_entities_mut());
-        let entities = &mut*entities;
+        let mut entities2 = block_on(ecm.get_entities_mut());
+        let entities = &mut*entities2;
 
-        for i in 0..100 {
+        const N: usize = 1_000_000;
+
+        for i in 0..N {
             let entity = entities.create();
             let name = String::from("Entity Nr.") + i.to_string().as_str();
-            entities.add(names, Name(name), entity);
-            if i > 49 {
+            entities.add(names, Name(name.clone()), entity);
+            if i > N/2 {
                 entities.add(positions, Pos(0.0,0.0), entity);
             }
             if i % 4 == 0 {
-                entities.add(healths, Health(i + 1), entity);
+                entities.add(healths, Health(i as u32 + 1), entity);
             }
         }
 
-        for (health,) in iterate_over_components!(mut healths) {
-            health.0 -= 1;
-        }
+        let before = std::time::SystemTime::now();
+        block_on(parallel_over_entities!( 
+            runntime: runntime; 
+            batch_size: 200; 
+            closure: |(_, health, name) : (EntityHandle, &mut Health, &mut Name)|
+            {
+                health.0 += 1;
+                let c = name.0.to_uppercase();
+                let n = c.len();
+                health.0 += f32::sqrt(n as f32) as u32;
+                assert!(health.0 < 1_000_000);
+            };
+            entities: entities; 
+            stores: mut healths, not positions, mut names
+        ));
+
+        let past = std::time::SystemTime::now().duration_since(before).unwrap();
+        println!("time taken: {} mics", past.as_micros());
+        println!("past!");
     }
 
     #[test]

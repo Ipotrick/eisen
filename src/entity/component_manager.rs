@@ -6,7 +6,7 @@ use crate::entity::entity_manager::*;
 use crate::entity::component_storage::*;
 
 pub struct EntityComponentManager {
-    stores: rustc_hash::FxHashMap<TypeId, Box<dyn ComponentStoreAccessor>>,
+    stores: rustc_hash::FxHashMap<TypeId, Box<dyn ComponentStoreAccessor + Sync + Send>>,
     entities: Arc<RwLock<EntityManager>>,
 }
 
