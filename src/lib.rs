@@ -1,11 +1,8 @@
-pub mod runtime;
 pub mod sync;
 pub mod entity;
 pub mod util;
 pub mod app;
 
-#[allow(unused)]
-use runtime::*;
 #[allow(unused)]
 use sync::*;
 #[allow(unused)]
@@ -49,10 +46,10 @@ mod tests {
     }
 
     impl User for MyUser {
-        fn init(self: Arc<Self>, _: Arc<AppMeta>) { println!("user init!"); }
-        fn cleanup(self: Arc<Self>, _: Arc<AppMeta>)  { println!("user cleanup!"); }
-        fn vary_tick(self: Arc<Self>, _: Arc<AppMeta>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{/*println!("user vary_tick!");*/}) }
-        fn fixed_tick(self: Arc<Self>, _: Arc<AppMeta>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{/*println!("user fixed_tick!");*/}) }
+        fn init(self: Arc<Self>, _: Arc<AppData>) { println!("user init!"); }
+        fn cleanup(self: Arc<Self>, _: Arc<AppData>)  { println!("user cleanup!"); }
+        fn vary_tick(self: Arc<Self>, _: Arc<AppData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{/*println!("user vary_tick!");*/}) }
+        fn fixed_tick(self: Arc<Self>, _: Arc<AppData>, _: Arc<FixedMeta>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{/*println!("user fixed_tick!");*/}) }
     }
 
     #[test]
@@ -116,7 +113,7 @@ mod tests {
 
     #[test]
     fn runtime_works() {
-        let rt = runtime::Runtime::new();
+        let rt = crate::sync::Runtime::new();
         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let w = {
             let w = AtomicWaiter::new();
@@ -148,7 +145,7 @@ mod tests {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     println!("low priority task");
                 };
-                rt.spawn_prioritised(task, runtime::task::Priority::Low);
+                rt.spawn_prioritised(task, sync::task::Priority::Low);
             }
             for _ in 0..100 {
                 let d = d.clone();
@@ -158,7 +155,7 @@ mod tests {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     println!("high priority task");
                 };
-                rt.spawn_prioritised(task, runtime::task::Priority::High);
+                rt.spawn_prioritised(task, sync::task::Priority::High);
             }
             for _ in 0..100 {
                 let d = d.clone();
@@ -168,7 +165,7 @@ mod tests {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     println!("very high priority task");
                 };
-                rt.spawn_prioritised(task, runtime::task::Priority::VeryHigh);
+                rt.spawn_prioritised(task, sync::task::Priority::VeryHigh);
             }
     
             w2
