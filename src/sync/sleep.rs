@@ -36,8 +36,11 @@ pub(crate) async fn sleep_sheduler(sleepers_rcv: async_std::channel::Receiver<Sl
     let mut sleepers = Vec::new();
     loop {
         if sleepers.is_empty() {
-            let sleeper = sleepers_rcv.recv().await.unwrap();
-            sleepers.push(sleeper);
+            if let Ok(sleeper) = sleepers_rcv.recv().await {
+                sleepers.push(sleeper);
+            } else {
+                break;
+            }
         }
 
         while let Ok(new_sleeper) = sleepers_rcv.try_recv() {

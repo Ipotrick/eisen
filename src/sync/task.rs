@@ -37,15 +37,18 @@ pub struct Task {
 pub enum ExecutionOrder {
     ExecuteTask(Arc<Task>),
     ExecuteClosure(ClosureBox),
-    Die,
 }
 
 impl ArcWake for Task {
     fn wake(self: Arc<Self>) {
-        self.execution_sender.send(ExecutionOrder::ExecuteTask(self.clone())).unwrap();
+        if self.execution_sender.send(ExecutionOrder::ExecuteTask(self.clone())).is_err() {
+            println!("WARNING: tried to wake up future on dead runtime!");
+        }
     }
 
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.execution_sender.send(ExecutionOrder::ExecuteTask(arc_self.clone())).unwrap();
+        if arc_self.execution_sender.send(ExecutionOrder::ExecuteTask(arc_self.clone())).is_err() {
+            println!("WARNING: tried to wake up future on dead runtime!");
+        }
     }
 }

@@ -60,8 +60,13 @@ mod tests {
     }
 
     #[test]
+    fn test2() {
+        let _runtime = Runtime::new();
+    }
+
+    #[test]
     fn ecm_par_iter_works() {
-        let runntime = Runtime::new();
+        let runtime = Runtime::new();
         let mut ecm = entity::EntityComponentManager::new();
         ecm.register_component::<Health>();
         ecm.register_component::<Pos>();
@@ -92,7 +97,7 @@ mod tests {
 
         let before = std::time::SystemTime::now();
         block_on(parallel_over_entities!( 
-            runntime: runntime; 
+            runtime: runtime;
             batch_size: 200; 
             closure: |(_, health, name) : (EntityHandle, &mut Health, &mut Name)|
             {
@@ -109,6 +114,7 @@ mod tests {
         let past = std::time::SystemTime::now().duration_since(before).unwrap();
         println!("time taken: {} mics", past.as_micros());
         println!("past!");
+        assert!(true);
     }
 
     #[test]

@@ -16,32 +16,27 @@ pub(crate) fn forget_lifetime<'a, 'b, T>(reference: &'a T) -> &'b T {
 #[allow(unused)]
 macro_rules! expand_iteration {
     ($iter:expr, mut $store:expr $(, $($rest:tt)+)?) => {
-        {    
-            let new_iter = $iter.filter_map(|tup| {
+        expand_iteration!(
+            $iter.filter_map(|tup| {
                 let index = tup.0;
                 Some(tup.append(crate::entity::iteration::forget_lifetime_mut($store.get_mut(index)?)))
-            });
-
-            expand_iteration!(new_iter $(, $($rest)+)?)
-        }
+            })
+            $(, $($rest)+)?
+        )
     };
     
     ($iter:expr, not $store:expr $(, $($rest:tt)+)?) => {
-        {
-            let new_iter = $iter.filter(|tup| !$store.has(tup.0));
-            expand_iteration!(new_iter $(, $($rest)+)?)
-        }
+        expand_iteration!($iter.filter(|tup| !$store.has(tup.0)) $(, $($rest)+)?)
     };
     
     ($iter:expr, $store:expr $(, $($rest:tt)+)?) => {
-        {
-            let new_iter = $iter.filter_map(|tup| {
+        expand_iteration!(
+            $iter.filter_map(|tup| {
                 let index = tup.0;
                 Some(tup.append($store.get(index)?))
-            });
-
-            expand_iteration!(new_iter $(, $($rest)+)?)
-        }
+            })
+            $(, $($rest)+)?
+        )
     };
 
     ($iter:expr) => {
@@ -134,7 +129,7 @@ macro_rules! borrow_multi {
 #[allow(unused)]
 #[macro_export]
 macro_rules! parallel_over_entities {
-    (runntime: $runntime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: $first_store:ident $(,$($rest:tt)+)?) => {
+    (runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: $first_store:ident $(,$($rest:tt)+)?) => {
         async {
             let waiter = crate::sync::AtomicWaiter::new();
             let $first_store = crate::entity::iteration::forget_lifetime($first_store);
@@ -147,23 +142,22 @@ macro_rules! parallel_over_entities {
                 let dep = waiter.make_dependency();
                 let func = move || {
                     let _d = dep;
-                    let iter = expand_iteration!(sub_store_iter $(,$($rest)+)?)
+                    expand_iteration!(sub_store_iter $(,$($rest)+)?)
                         .map(|tup| {
                             let index = tup.0;
                             tup.replace_first(EntityHandle{index: index, version: ent.version_of(index).unwrap()})
-                        });
-                    
-                    iter.for_each(clo);
+                        })
+                        .for_each(clo);
                 };
     
-                $runntime.exec(func);
+                $runtime.exec(func);
             }
 
             waiter
         }
     };
 
-    (runntime: $runntime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: mut $first_store:ident $(,$($rest:tt)+)?) => {
+    (runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: mut $first_store:ident $(,$($rest:tt)+)?) => {
         async {
             let waiter = crate::sync::AtomicWaiter::new();
             let $first_store = crate::entity::iteration::forget_lifetime_mut($first_store);
@@ -176,16 +170,15 @@ macro_rules! parallel_over_entities {
                 let dep = waiter.make_dependency();
                 let func = move || { 
                     let _d = dep;
-                    let iter = expand_iteration!(sub_store_iter $(,$($rest)+)?)
+                    expand_iteration!(sub_store_iter $(,$($rest)+)?)
                         .map(|tup| {
                             let index = tup.0;
                             tup.replace_first(EntityHandle{index: index, version: ent.version_of(index).unwrap()})
-                        });
-                    
-                    iter.for_each(clo);
+                        })
+                        .for_each(clo);
                 };
     
-                $runntime.exec(func);
+                $runtime.exec(func);
             }
 
             waiter.await

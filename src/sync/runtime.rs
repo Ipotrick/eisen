@@ -1,6 +1,7 @@
 pub use std::{cell::RefCell, pin::Pin, task::Waker};
 pub use futures::{Future, FutureExt, task::{waker_ref}};
 pub use smallbox::SmallBox;
+use std::sync::atomic::Ordering;
 
 pub use {
     futures::{
@@ -26,7 +27,8 @@ pub(crate) struct RuntimeMeta {
     execution_reciever_very_high: crossbeam_channel::Receiver<ExecutionOrder>,
     // sorted in reverse order of wake up time. Last Element will wake up first
     pub(crate) new_sleepers_snd: async_std::channel::Sender<SleepingTask>,
-    end_program: std::sync::atomic::AtomicBool,
+    end_runtime: std::sync::atomic::AtomicBool,
+    open_tasks: std::sync::atomic::AtomicU64,
 }
 
 #[allow(unused)]
@@ -39,6 +41,11 @@ fn process_task(meta: &Arc<RuntimeMeta>, execution_sender: &crossbeam_channel::S
             .unwrap()
             .as_mut()
             .poll(context);
+
+        if finished {
+            meta.open_tasks.fetch_sub(1, Ordering::Relaxed);
+        }
+        
         finished
     };
 }
@@ -52,6 +59,13 @@ fn worker(meta: Arc<RuntimeMeta>, _worker_index: usize) {
             recv(meta.execution_reciever_normal) -> order => (&meta.execution_sender_normal, order.unwrap()),
             recv(meta.execution_reciever_high) -> order => (&meta.execution_sender_high, order.unwrap()),
             recv(meta.execution_reciever_very_high) -> order => (&meta.execution_sender_very_high, order.unwrap()),
+            default(std::time::Duration::from_millis(100)) => {
+                if meta.end_runtime.load(Ordering::Relaxed) && meta.open_tasks.load(Ordering::Relaxed) == 0 {
+                    break 'outer;
+                } else {
+                    continue 'outer;
+                }
+            },
         };
 
         'inner: loop {
@@ -62,7 +76,6 @@ fn worker(meta: Arc<RuntimeMeta>, _worker_index: usize) {
                 ExecutionOrder::ExecuteClosure(mut closure) => {
                     closure();
                 },
-                ExecutionOrder::Die => break 'outer,
             };
 
             // after we executed an order, we try to directly execute other tasks but we also prioritise the orders from the channels
@@ -91,7 +104,7 @@ fn worker(meta: Arc<RuntimeMeta>, _worker_index: usize) {
 
 pub struct Runtime {
     pub(crate) meta: Arc<RuntimeMeta>,
-    worker_joins: Vec<std::thread::JoinHandle<()>>,
+    worker_joins: Mutex<Option<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 impl Runtime {
@@ -113,11 +126,12 @@ impl Runtime {
             execution_reciever_high:        r_high,
             execution_reciever_very_high:   r_very_high,
             new_sleepers_snd:               sleepers_snd,
-            end_program:    	            std::sync::atomic::AtomicBool::from(false),
+            end_runtime:    	            std::sync::atomic::AtomicBool::from(false),
+            open_tasks:                 std::sync::atomic::AtomicU64::from(0),
         });
 
-        let worker_thread_count = usize::max(1,num_cpus::get_physical() - 1);
-        println!("{} Threads are spawned for the Runtime.", worker_thread_count);
+        let worker_thread_count = usize::max(1,num_cpus::get_physical());
+        println!("INFO:   Runtime started with pool of {} threads.", worker_thread_count);
         let mut worker_join_handles = Vec::new();
         worker_join_handles.reserve(worker_thread_count);
 
@@ -129,7 +143,7 @@ impl Runtime {
 
         let ret = Self {
             meta: meta,
-            worker_joins: worker_join_handles,
+            worker_joins: Mutex::new(Some(worker_join_handles)),
         };
 
         ret.spawn_prioritised(sleep_sheduler(sleepers_rcv), Priority::Low);
@@ -137,6 +151,11 @@ impl Runtime {
         ret
     }
 
+    /**
+     * Executes a prioritised future on a threadpool.
+     * Submitted future should not block.
+     * Submitted future should have a short runtime (<200mics) or yield periodicly.
+     */
     #[allow(unused)]
     pub fn spawn_prioritised(&self, future: impl Future<Output = ()> + Send + Sync + 'static, priority: Priority) {
         let sender = match priority {
@@ -152,14 +171,27 @@ impl Runtime {
             priority: priority,
         });
 
+        self.meta.open_tasks.fetch_add(1, Ordering::Relaxed);
+
         sender.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap();
     }
 
+    /**
+     * Executes a future on a threadpool.
+     * Submitted future should not block.
+     * Submitted future should have a short runtime (<200mics) or yield periodicly.
+     */
     #[allow(unused)]
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + Sync + 'static) {
         self.spawn_prioritised(future, Priority::Normal);
     }
 
+    /**
+     * Executes a prioritised closure on a threadpool.
+     * Submitted Closures should not block.
+     * Submitted Closures should have a short runtime (<200mics).
+     * If the task needs to sync, please spawn a sync task via the spawn function.
+     */
     #[allow(unused)]
     pub fn exec_prioritised(&self, closure: impl FnOnce() + Send + 'static, priority: Priority) {
         match priority {
@@ -170,22 +202,40 @@ impl Runtime {
         }
     }
     
+    /**
+     * Executes a closure on a threadpool.
+     * Submitted Closures should not block.
+     * Submitted Closures should have a short runtime (<200mics).
+     * If the task needs to sync, please spawn a sync task via the spawn function.
+     */
     #[allow(unused)]
     pub fn exec(&self, closure: impl FnOnce() + Send + 'static) {
         self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap();
+    }
+
+    /**
+     * Kills threadpool.
+     * All worker threads will terminate AFTER all open tasks are completed.
+     * Looping tasks MUST be notified/terminated before calling this function!
+    */
+    #[allow(unused)]
+    pub fn stop(&self) {
+        if let Some(mut worker_joins) = self.worker_joins.lock().unwrap().take() {
+            self.meta.end_runtime.store(true, Ordering::Relaxed);
+    
+            self.meta.new_sleepers_snd.close();
+    
+            while let Some(join_handle) = worker_joins.pop() {
+                let _ = join_handle.join();
+            }
+    
+            println!("INFO:   Runtime shut down.");
+        }
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        self.meta.end_program.fetch_or(true, std::sync::atomic::Ordering::Relaxed);
-
-        for _ in 0..self.worker_joins.len() {
-            self.meta.execution_sender_normal.send(ExecutionOrder::Die).unwrap();
-        }
-
-        while let Some(joinhandle) = self.worker_joins.pop() {
-            let _ = joinhandle.join();
-        }
+        self.stop();
     }
 }
