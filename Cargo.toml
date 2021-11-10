@@ -22,3 +22,5 @@ futures = "0.3.17"
 async-std = "1.7.0"
 crossbeam-channel = "0.5.1"
 rustc-hash = "*"
+profiling = { version = "*", features = ["profile-with-tracy"] }
+spin_sleep = "1.0.0"

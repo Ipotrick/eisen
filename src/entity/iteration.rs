@@ -45,141 +45,77 @@ macro_rules! expand_iteration {
 }
 
 #[allow(unused)]
-#[macro_export]
-macro_rules! iterate_over_entities_components {
-    ($entities:expr, mut $first_store:expr $(, $($rest:tt)+)?) => {
-        expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
-        .map(|tup| {
-            let index = tup.0;
-            tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
-        })
-    };
-
-    ($entities:expr, $first_store:expr $(,$($rest:tt)+)?) => {
-        expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
-            .map(|tup| {
-                let index = tup.0;
-                tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
-            })
-    };
-}
-
-#[allow(unused)]
-macro_rules! wash_lifetime {
-
-    (mut $first:ident, $($rest:tt)+) => {
+macro_rules! erase_lifetime_check {
+    (mut $first:ident $(, $($rest:tt)+)?) => {
         let $first = crate::entity::iteration::forget_lifetime_mut($first);
-        wash_lifetime!($($rest)+)
+        $(erase_lifetime_check!($($rest)+))?
     };
 
-    (not $first:ident, $($rest:tt)+) => {
+    (not $first:ident $(, $($rest:tt)+)?) => {
         let $first = crate::entity::iteration::forget_lifetime($first);
-        wash_lifetime!($($rest)+)
+        $(erase_lifetime_check!($($rest)+))?
     };
 
-    ($first:ident, $($rest:tt)+) => {
+    ($first:ident $(, $($rest:tt)+)?) => {
         let $first = crate::entity::iteration::forget_lifetime(&*$first);
-        wash_lifetime!($($rest)+)
-    };
-    
-    (mut $first:ident) => {
-        let $first = crate::entity::iteration::forget_lifetime_mut($first);
-    };
-
-    (not $first:ident) => {
-        let $first = crate::entity::iteration::forget_lifetime($first);
-    };
-    
-    ($first:ident) => {
-        let $first = crate::entity::iteration::forget_lifetime($first);
-    };
-}
-
-#[allow(unused)]
-macro_rules! borrow_multi {
-
-    (mut $first:ident, $($rest:tt)+) => {
-        let $first = $first;
-        wash_lifetime!($($rest)+)
-    };
-
-    (not $first:ident, $($rest:tt)+) => {
-        let $first = $first;
-        wash_lifetime!($($rest)+)
-    };
-
-    ($first:ident, $($rest:tt)+) => {
-        let $first = $first;
-        wash_lifetime!($($rest)+)
-    };
-    
-    (mut $first:ident) => {
-        let $first = $first;
-    };
-
-    (not $first:ident) => {
-        let $first = $first;
-    };
-    
-    ($first:ident) => {
-        let $first = $first;
+        $(erase_lifetime_check!($($rest)+))?
     };
 }
 
 #[allow(unused)]
 #[macro_export]
 macro_rules! parallel_over_entities {
-    (runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: $first_store:ident $(,$($rest:tt)+)?) => {
-        async {
+    ($(note: $note:literal;)? runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: $first_store:ident $(,$($rest:tt)+)?) => {
+        async { 
             let waiter = crate::sync::AtomicWaiter::new();
-            let $first_store = crate::entity::iteration::forget_lifetime($first_store);
-            let mut batches = $first_store.iter_entity_batch($batch_size);
-            while let Some(sub_store_iter) = batches.pop() {
-                let _first_dummy = &0;
-                wash_lifetime!(_first_dummy $(,$($rest)+)?);
-                let clo = $closure.clone();
-                let ent = crate::entity::iteration::forget_lifetime($entities);
+            erase_lifetime_check!($first_store);
+
+            $first_store.iter_entity_batch($batch_size)
+            .for_each(|batch_iter|{
+                $(erase_lifetime_check!($($rest)+);)?
+                erase_lifetime_check!($entities);
                 let dep = waiter.make_dependency();
-                let func = move || {
+                let func = || { 
+                    profiling::scope!("parallel_over_entities" $(,$note)?);
                     let _d = dep;
-                    expand_iteration!(sub_store_iter $(,$($rest)+)?)
+                    expand_iteration!(batch_iter $(,$($rest)+)?)
                         .map(|tup| {
                             let index = tup.0;
-                            tup.replace_first(EntityHandle{index: index, version: ent.version_of(index).unwrap()})
+                            tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
                         })
-                        .for_each(clo);
+                        .for_each($closure);
                 };
     
                 $runtime.exec(func);
-            }
+            });
 
             waiter
         }
     };
 
-    (runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: mut $first_store:ident $(,$($rest:tt)+)?) => {
+    ($(note: $note:literal;)? runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: mut $first_store:ident $(,$($rest:tt)+)?) => {
         async {
             let waiter = crate::sync::AtomicWaiter::new();
-            let $first_store = crate::entity::iteration::forget_lifetime_mut($first_store);
-            let mut batches = $first_store.iter_entity_mut_batch($batch_size);
-            while let Some(sub_store_iter) = batches.pop() {
-                let _first_dummy = &0;
-                wash_lifetime!(_first_dummy $(,$($rest)+)?);
-                let clo = $closure.clone();
-                let ent = crate::entity::iteration::forget_lifetime($entities);
-                let dep = waiter.make_dependency();
-                let func = move || { 
-                    let _d = dep;
-                    expand_iteration!(sub_store_iter $(,$($rest)+)?)
-                        .map(|tup| {
-                            let index = tup.0;
-                            tup.replace_first(EntityHandle{index: index, version: ent.version_of(index).unwrap()})
-                        })
-                        .for_each(clo);
-                };
-    
-                $runtime.exec(func);
-            }
+            erase_lifetime_check!(mut $first_store);
+
+            $first_store.iter_entity_mut_batch($batch_size)
+                .for_each(|batch_iter|{
+                    $(erase_lifetime_check!($($rest)+);)?
+                    erase_lifetime_check!($entities);
+                    let dep = waiter.make_dependency();
+                    let func = move || { 
+                        profiling::scope!("parallel_over_entities" $(,$note)?);
+                        let _d = dep;
+                        expand_iteration!(batch_iter $(,$($rest)+)?)
+                            .map(|tup| {
+                                let index = tup.0;
+                                tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
+                            })
+                            .for_each($closure);
+                    };
+        
+                    $runtime.exec(func);
+                });
 
             waiter.await
         }
@@ -188,28 +124,34 @@ macro_rules! parallel_over_entities {
 
 #[allow(unused)]
 #[macro_export]
-macro_rules! iterate_over_components {
-    (mut $first_store:expr $(,$($rest:tt)+)?) => { 
-        expand_iteration!($first_store.iter_entity_mut() $(,$($rest)+)?)
-            .map(|tup| tup.pop_front())
-    };
-
-    ($first_store:expr $(,$($rest:tt)+)?) => {
-        expand_iteration!($first_store.iter_entity() $(,$($rest)+)?)
-            .map(|tup| tup.pop_front())
-    }; 
-}
-
-#[allow(unused)]
-#[macro_export]
 macro_rules! iterate_over_entities {
-    (mut $first_store:expr $(,$($rest:tt)+)?) => { 
-        expand_iteration!($first_store.iter_entity_mut() $(,$($rest)+)?)
-            .map(|tup| tup.0)
+    (entities: $entities:expr; stores: mut $first_store:expr $(,$($rest:tt)+)?) => { 
+        expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
+            .map(|tup|{
+                let index = tup.0;
+                tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
+            })
     };
 
-    ($first_store:expr $(,$($rest:tt)+)?) => {
-        expand_iteration!($first_store.iter_entity() $(,$($rest)+)?)
-            .map(|tup| tup.0)
+    (entities: $entities:expr; stores: $first_store:expr $(,$($rest:tt)+)?) => {
+        expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
+            .map(|tup| {
+                let index = tup.0;
+                tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
+            })
+    };
+    
+    (stores: mut $first_store:expr $(,$($rest:tt)+)?) => { 
+        expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
+            .map(|tup| {
+                tup.pop_front()
+            })
+    };
+
+    (stores: $first_store:expr $(,$($rest:tt)+)?) => { 
+        expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
+            .map(|tup| {
+                tup.pop_front()
+            })
     };
 }
