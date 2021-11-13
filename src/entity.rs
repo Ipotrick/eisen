@@ -5,6 +5,7 @@ pub mod entity_manager;
 pub mod component_storage;
 pub mod component_manager;
 pub mod iteration;
+mod default_components;
 
 #[allow(unused)]
 pub use handle::{EntityHandle};
@@ -17,3 +18,5 @@ pub use component_manager::{EntityComponentManager};
 pub use entity_manager::{EntityManager};
 #[allow(unused)]
 pub use iteration::*;
+#[allow(unused)]
+pub use default_components::*;

@@ -66,8 +66,6 @@ fn process_task(meta: &Arc<RuntimeMeta>, execution_sender: &crossbeam_channel::S
 #[allow(unused)]
 fn worker(meta: Arc<RuntimeMeta>, worker_index: usize) {
     
-    // register thread/core to profiling
-    profiling::register_thread!(std::format!("worker thread {}", worker_index).as_str());
     // main worker loop
     'outer: while !meta.end_runtime.load(Ordering::Relaxed) || meta.open_tasks.load(Ordering::Acquire) > 0 {
         // if there are no tasks directly available, we sleep and wake up to execute the next available Order from any queue
@@ -178,7 +176,14 @@ impl Runtime {
             .into_iter()
             .map(|index|{
                 let meta = meta.clone();
-                std::thread::spawn(move || { worker(meta, index); })
+                std::thread::Builder::new()
+                    .name(std::format!("worker thread {}", index))
+                    .spawn(move || { 
+                        // register thread/core to profiling
+                        profiling::register_thread!(std::format!("worker thread {}", index).as_str());
+                        worker(meta, index); 
+                    })
+                    .unwrap()
             })
             .collect::<Vec<_>>();
 

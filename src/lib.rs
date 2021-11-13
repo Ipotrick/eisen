@@ -2,6 +2,13 @@ pub mod sync;
 pub mod entity;
 pub mod util;
 pub mod app;
+pub mod rendering;
+
+pub mod dev;
+
+pub type Vf32x2 = cgmath::Vector2<f32>;
+pub type Vf32x3 = cgmath::Vector3<f32>;
+pub type Vf32x4 = cgmath::Vector4<f32>;
 
 #[allow(unused)]
 use sync::*;
@@ -14,8 +21,6 @@ use app::*;
 
 #[cfg(test)]
 mod tests {
-
-    use std::time::Instant;
 
     use futures::executor::block_on;
 
@@ -45,111 +50,11 @@ mod tests {
         type Storage = entity::DenseStore<Self>;
     }
 
-    struct MyUser {
-
-    }
-
-    //fn operation((_, health) : (EntityHandle, &mut Health)) {
-    //    health.0 += 1;
-    //}
-
-    impl User for MyUser {
-        fn init(self: Arc<Self>, app: Arc<AppData>) {
-            let init = async{
-                println!("user init!"); 
-                let ecm = &app.ecm;
-                
-                get_components_mut!(manager: ecm; components: Health, Pos, Name => healths, positions, names);
-                get_entities_mut!(manager: ecm => entities);
-        
-                const N: usize = 100_000;
-                for i in 0..N {
-                    let entity = entities.create();
-    
-                    entities.add(names, Name(String::from("Entity Nr.") + i.to_string().as_str()), entity);
-    
-                    if i > N/2 {
-                        entities.add(positions, Pos(0.0,0.0), entity);
-                    }
-    
-                    if i % 4 == 0 {
-                        entities.add(healths, Health(0), entity);
-                    }
-                }
-                println!("init complete");
-            } ;
-
-
-            block_on(init);
-        }
-        fn cleanup(self: Arc<Self>, _: Arc<AppData>)  { println!("user cleanup!"); }
-
-        fn vary_tick(self: Arc<Self>, app: Arc<AppData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ 
-            let app = app.clone();
-            Box::pin(async move {
-
-                let ecm = &app.ecm;
-                //let runtime = &app.runtime;
-                get_components_mut!(manager: ecm; components: Health => healths);
-                get_entities_mut!(manager: ecm => entities);
-
-                println!("before");
-                let earlier = std::time::Instant::now();
-
-                {
-                    profiling::scope!("signal for start!");
-                }
-                //parallel_over_entities!(
-                //    runtime: runtime;
-                //    batch_size: 1000; 
-                //    closure: 
-                //    |(_, health) : (EntityHandle, &mut Health)|{
-                //        health.0 = f32::exp2(f32::sqrt(health.0 as f32 * 3.3)) as u32;
-                //    };
-                //    entities: entities;
-                //    stores: mut healths 
-                //).await;
-                {
-                    profiling::scope!("sequential iter");
-                    for (_, health) in iterate_over_entities!(entities: entities; stores: mut healths) {
-                        health.0 = f32::exp2(f32::sqrt(health.0 as f32 * 3.3)) as u32;
-                    }
-                }
-                {
-                    profiling::scope!("signal for resume!");
-                }
-
-
-                println!("time taken: {}mics", earlier.elapsed().as_micros());
-                println!("after");
-
-                //app.end();
-            })
-        }
-        fn fixed_tick(self: Arc<Self>, _: Arc<AppData>, _: Arc<FixedData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>{ Box::pin(async{
-            profiling::scope!("fixed_tick_user","");
-            spin_sleep::sleep(std::time::Duration::from_millis(100));
-        }) }
-    }
-
     #[test]
     fn dev() {
-        let my_user = MyUser{};
+        let my_user = dev::MyUser{};
         let app = Application::new(my_user);
         app.run();
-    }
-
-
-    #[test]
-    fn sleeptest() {
-        let joiner = std::thread::spawn(||{
-            loop {
-                let earlier = Instant::now();
-                spin_sleep::sleep(std::time::Duration::from_nanos(1_200_000));
-                println!("sleep time taken: {}mics", earlier.elapsed().as_micros());
-            }
-        });
-        joiner.join();
     }
 
     #[test]

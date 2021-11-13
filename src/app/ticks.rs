@@ -9,30 +9,21 @@ pub struct FixedData {
     pub fixed_delta_time_secs: f32,
 }
 
-pub(crate) async fn vary_tick(appdata: Arc<AppData>, user: Arc<dyn User>) {
-    {
-        profiling::scope!("vary_tick before user");
+pub(crate) struct FixedStepUpdateSignal;
 
+pub(crate) fn fixed_time_step_notify(meta: Arc<SharedAppData>, signal_snd: async_std::channel::Sender<FixedStepUpdateSignal>) {
+    profiling::register_thread!("fixed time step notify thread".into());
+    while !meta.end_program.load(Ordering::Relaxed) {
+        spin_sleep::sleep(Duration::from_nanos(meta.get_fixed_delta_time_nanos()));
+        profiling::scope!("fixed step notify");
+        if signal_snd.len() < 2 {
+            let _ = signal_snd.try_send(FixedStepUpdateSignal{});
+        }
     }
-
-    user.vary_tick(appdata.clone()).await;
 }
 
-async fn fixed_tick(appdata: Arc<AppData>, user: Arc<dyn User>) {
-    let fixed_data = Arc::new(FixedData{
-        fixed_delta_time_nanos: appdata.get_fixed_delta_time_nanos(),
-        fixed_delta_time_secs: appdata.get_fixed_delta_time_secs(),
-    });
-
-    {
-        profiling::scope!("fixed_tick before user","");
-
-    };
-
-    user.clone().fixed_tick(appdata.clone(), fixed_data.clone()).await;
-}
-
-pub(crate) async fn fixed_loop(signal: async_std::channel::Receiver<FixedStepUpdateSignal>, appdata: Arc<AppData>, user: Arc<dyn User>) {
+pub(crate) async fn fixed_loop(signal: async_std::channel::Receiver<FixedStepUpdateSignal>, appdata: Arc<SharedAppData>, user: Arc<dyn User>) 
+{
     loop {
         let _ = signal.recv().await;
         if appdata.end_program.load(Ordering::Relaxed) {
@@ -41,4 +32,29 @@ pub(crate) async fn fixed_loop(signal: async_std::channel::Receiver<FixedStepUpd
         fixed_tick(appdata.clone(), user.clone()).await;
     }
     println!("INFO:   ended fixed loop");
+}
+
+async fn fixed_tick(appdata: Arc<SharedAppData>, user: Arc<dyn User>) {
+    let fixed_data = Arc::new(FixedData{
+        fixed_delta_time_nanos: appdata.get_fixed_delta_time_nanos(),
+        fixed_delta_time_secs: appdata.get_fixed_delta_time_secs(),
+    });
+
+    {
+        profiling::scope!("fixed_tick before user");
+    }
+
+    user.fixed_tick(appdata.clone(), fixed_data.clone()).await;
+}
+
+pub(crate) async fn vary_tick(maindata: Arc<Mutex<VaryAppData>>, appdata: Arc<SharedAppData>, user: Arc<dyn User>) {
+    {
+        profiling::scope!("vary_tick before user");
+    }
+
+    user.vary_tick(appdata.clone()).await;
+
+    let mut varydata = maindata.lock().await;
+
+    varydata.renderer.render().await.unwrap();
 }

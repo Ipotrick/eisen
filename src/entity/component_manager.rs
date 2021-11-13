@@ -93,7 +93,7 @@ impl EntityComponentManager {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_components_mut {    
-    (manager: $ecm:ident; components: $StoreType:ty $(,$($RestTypes:ty),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
+    (manager: $ecm:expr; components: $StoreType:ty $(,$($RestTypes:ty),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
         let $name = $ecm.get_store::<$StoreType>().await;
         let mut $name = $name.write().await;
         let $name = &mut*$name;
@@ -108,7 +108,7 @@ macro_rules! get_components_mut {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_components {    
-    (manager: $ecm:ident; components: $StoreType:ty $(,$($RestTypes:tt),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
+    (manager: $ecm:expr; components: $StoreType:ty $(,$($RestTypes:tt),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
         let $name = $ecm.get_store::<$StoreType>().await;
         let $name = $name.read().await;
         let $name = &*$name;
@@ -123,7 +123,7 @@ macro_rules! get_components {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_entities {
-    (manager: $ecm:ident => $name:ident) => {
+    (manager: $ecm:expr => $name:ident) => {
         let $name = $ecm.get_entities();
         let $name = $name.read().await;
         let $name = &*$name;
@@ -137,7 +137,7 @@ macro_rules! get_entities {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_entities_mut {
-    (manager: $ecm:ident => $name:ident) => {
+    (manager: $ecm:expr => $name:ident) => {
         let $name = $ecm.get_entities();
         let mut $name = $name.write().await;
         let $name = &mut*$name;
