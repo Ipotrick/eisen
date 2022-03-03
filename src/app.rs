@@ -1,7 +1,9 @@
 mod ticks;
 use std::thread::JoinHandle;
+use async_std::sync::Mutex;
 use ticks::*;
 pub use ticks::FixedData;
+use winit::event::VirtualKeyCode;
 
 use std::time::{Duration, Instant};
 use std::{pin::Pin, sync::Arc};
@@ -35,6 +37,8 @@ pub struct SharedAppData {
     pub(crate) min_vary_delta_time: AtomicU64,
     pub(crate) vary_delta_time: AtomicU64,
     pub(crate) fixed_delta_time: AtomicU64,
+    pub(crate) input_state_varstep: Mutex<InputState>,
+    pub(crate) input_state_fixedstep: Mutex<InputState>,
 }
 
 impl SharedAppData {
@@ -73,14 +77,76 @@ impl SharedAppData {
     pub fn end(&self) {
         self.end_program.store(true, Ordering::Relaxed);
     }
+    
+    pub async fn key_pressed_varstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_varstep.lock().await;
+        input_state.key_states[key as usize]
+    }
+
+    pub async fn key_released_varstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_varstep.lock().await;
+        !input_state.key_states[key as usize]
+    }
+
+    pub async fn key_just_pressed_varstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_varstep.lock().await;
+        input_state.key_states[key as usize] && !input_state.key_states_old[key as usize]
+    }
+
+    pub async fn key_just_released_varstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_varstep.lock().await;
+        !input_state.key_states[key as usize] && input_state.key_states_old[key as usize]
+    }
+
+    pub async fn key_pressed_fixedstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_fixedstep.lock().await;
+        input_state.key_states[key as usize]
+    }
+
+    pub async fn key_released_fixedstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_fixedstep.lock().await;
+        !input_state.key_states[key as usize]
+    }
+
+    pub async fn key_just_pressed_fixedstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_fixedstep.lock().await;
+        input_state.key_states[key as usize] && !input_state.key_states_old[key as usize]
+    }
+
+    pub async fn key_just_released_fixedstep(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_fixedstep.lock().await;
+        !input_state.key_states[key as usize] && input_state.key_states_old[key as usize]
+    }
 }
 
 //o------------ Application ---------------o
 
+pub(crate) struct InputState {
+    pub(crate) key_states_old: Box<[bool; 512]>,
+    pub(crate) key_states: Box<[bool; 512]>,
+    pub(crate) button_states_old: Box<[bool; 16]>,
+    pub(crate) button_states: Box<[bool; 16]>,
+    pub(crate) cursor_pos_old: [i32; 2],
+    pub(crate) cursor_pos: [i32; 2],
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self{
+            key_states_old: Box::new([false; 512]),
+            key_states: Box::new([false; 512]),
+            button_states_old: Box::new([false; 16]),
+            button_states: Box::new([false; 16]),
+            cursor_pos_old: [0; 2],
+            cursor_pos: [0; 2],
+        }
+    }
+}
+
 #[allow(unused)]
 pub struct Application<T : User> 
 {
-    meta: Arc<SharedAppData>,
+    pub(crate) shared_data: Arc<SharedAppData>,
     event_loop: Option<EventLoop<()>>,
     user: Arc<T>,
     fixed_step_signal_thread: Option<JoinHandle<()>>,
@@ -90,6 +156,7 @@ pub struct Application<T : User>
 
 impl<T: User + 'static> Application<T> 
 {
+
     pub fn new() -> Self 
     {
         env_logger::init();
@@ -97,15 +164,17 @@ impl<T: User + 'static> Application<T>
         let window = WindowBuilder::new().build(&event_loop).unwrap();
         let renderer = block_on(Renderer::new(&window));
         Self{
-            meta: Arc::new(SharedAppData{
+            shared_data: Arc::new(SharedAppData{
                 end_program: AtomicBool::new(false),
                 runtime: Runtime::new(),
                 ecm: EntityComponentManager::new(),
                 window,
-                min_vary_delta_time: AtomicU64::from(1_000_000),
+                min_vary_delta_time: AtomicU64::from(100_000_000),
                 vary_delta_time: AtomicU64::from(0),
                 fixed_delta_time: AtomicU64::from(1_000_000),
                 renderer,
+                input_state_varstep: Mutex::new(InputState::default()),
+                input_state_fixedstep: Mutex::new(InputState::default()),
             }),
             event_loop: Some(event_loop),
             user: Arc::new(T::default()),
@@ -118,13 +187,13 @@ impl<T: User + 'static> Application<T>
     pub fn run(mut self) 
     {
         profiling::register_thread!("main thread");
-        self.user.clone().init(self.meta.clone());
+        self.user.clone().init(self.shared_data.clone());
 
         let event_loop = self.event_loop.take().unwrap();
 
-        self.meta.runtime.spawn_prioritised(fixed_loop(self.fixed_step_signal.1.clone(), self.meta.clone(), self.user.clone()), crate::sync::task::Priority::VeryHigh);
+        self.shared_data.runtime.spawn_prioritised(fixed_loop(self.fixed_step_signal.1.clone(), self.shared_data.clone(), self.user.clone()), crate::sync::task::Priority::VeryHigh);
 
-        let meta_clone = self.meta.clone();
+        let meta_clone = self.shared_data.clone();
         let signal_snd = self.fixed_step_signal.0.clone();
         self.fixed_step_signal_thread = Some(
             std::thread::Builder::new()
@@ -138,11 +207,21 @@ impl<T: User + 'static> Application<T>
             match event {
                 Event::MainEventsCleared => self.on_main_events_cleared(control_flow),
                 Event::RedrawRequested(_) => { },
-                Event::WindowEvent{ ref event,  window_id, } if (window_id == self.meta.window.id()) => {
+                Event::WindowEvent{ ref event,  window_id, } if (window_id == self.shared_data.window.id()) => {
                     match event {
                         WindowEvent::CloseRequested                                                     => *control_flow = ControlFlow::Exit,
-                        WindowEvent::Resized(physical_size)                            => block_on(self.meta.renderer.resize(*physical_size)),
-                        WindowEvent::ScaleFactorChanged { new_inner_size, .. }     => block_on(self.meta.renderer.resize(**new_inner_size)),
+                        WindowEvent::Resized(physical_size)                            => block_on(self.shared_data.renderer.resize(*physical_size)),
+                        WindowEvent::ScaleFactorChanged { new_inner_size, .. }     => block_on(self.shared_data.renderer.resize(**new_inner_size)),
+                        WindowEvent::KeyboardInput{device_id,input,is_synthetic} => {
+                            let index = input.virtual_keycode.unwrap() as usize;
+                            let in_state = &mut*spin_on!(self.shared_data.input_state_varstep.try_lock());
+
+                            in_state.key_states_old[index] = in_state.key_states[index];
+                            in_state.key_states[index] = match input.state { 
+                                winit::event::ElementState::Pressed => true, 
+                                winit::event::ElementState::Released => false 
+                            };
+                        },
                         _ => { }
                     }
                 },
@@ -154,22 +233,23 @@ impl<T: User + 'static> Application<T>
     fn on_main_events_cleared(&mut self, control_flow: &mut ControlFlow) 
     {
         profiling::scope!("MainEventsCleared");
-        self.meta.window.request_redraw();
-        if self.meta.end_program.load(Ordering::Relaxed) {
+        self.shared_data.window.request_redraw();
+        if self.shared_data.end_program.load(Ordering::Relaxed) {
             *control_flow = ControlFlow::Exit
         } else {
+
             let waiter = AtomicWaiter::new();
             let dep = waiter.make_dependency();
-            let vary_future = vary_tick(self.meta.clone(), self.user.clone());
+            let vary_future = vary_tick(self.shared_data.clone(), self.user.clone());
             let vary_future = async move {
                 let _d = dep;
                 vary_future.await;
             };
 
-            self.meta.runtime.spawn_prioritised(vary_future, crate::sync::task::Priority::VeryHigh);
+            self.shared_data.runtime.spawn_prioritised(vary_future, crate::sync::task::Priority::VeryHigh);
 
-            let clamped_time_taken = self.last_frame_end.elapsed().as_nanos().clamp(0, self.meta.get_min_delta_time_nanos() as u128) as u64;
-            let left_time = self.meta.get_min_delta_time_nanos() - clamped_time_taken;
+            let clamped_time_taken = self.last_frame_end.elapsed().as_nanos().clamp(0, self.shared_data.get_min_delta_time_nanos() as u128) as u64;
+            let left_time = self.shared_data.get_min_delta_time_nanos() - clamped_time_taken;
 
             spin_sleep::sleep(Duration::from_nanos(left_time));
 
@@ -184,10 +264,10 @@ impl<T: User> Drop for Application<T>
 {
     fn drop(&mut self) 
     {
-        self.user.clone().cleanup(self.meta.clone());
-        self.meta.end_program.store(true, Ordering::Relaxed);
+        self.user.clone().cleanup(self.shared_data.clone());
+        self.shared_data.end_program.store(true, Ordering::Relaxed);
         let _ = self.fixed_step_signal.0.try_send(FixedStepUpdateSignal{});
-        self.meta.runtime.stop();
+        self.shared_data.runtime.stop();
         if let Some(t) = self.fixed_step_signal_thread.take() {
             t.join().unwrap();
         }

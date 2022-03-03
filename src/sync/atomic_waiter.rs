@@ -60,7 +60,6 @@ impl Future for AtomicWaiter {
             let mut waker = self.data.waker.lock().unwrap();
             *waker = Some(cx.waker().clone());
         }
-        
         if self.data.count.load(std::sync::atomic::Ordering::Relaxed) == 0 {
             Poll::Ready(())
         } else {

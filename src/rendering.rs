@@ -8,6 +8,14 @@ const QUADS_PER_BATCH: usize = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct QuadDrawGlobals{
+    camera_translation: [f32; 2],
+    camera_rotation: [f32; 2],
+    camera_scale: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct QuadDrawInfo{
     pub color: [f32; 4],
     pub scale: [f32; 2],
@@ -47,8 +55,11 @@ pub struct RenderState
     last_buffer_fill_len: usize,
     rect_index_buffer: wgpu::Buffer,
     rect_pipeline_binding_group_layout: wgpu::BindGroupLayout,
+    rect_pipeline_globals_binding_group_layout: wgpu::BindGroupLayout,
+    rect_globals_buffer: wgpu::Buffer,
     rect_pipeline_layout: wgpu::PipelineLayout,
     rect_pipeline: wgpu::RenderPipeline,
+    globals: QuadDrawGlobals,
 }
 
 pub struct Renderer 
@@ -137,9 +148,32 @@ impl Renderer
             label: Some("quad render bind group layout"),
         });
 
+        let globals_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer{
+                        has_dynamic_offset: false,
+                        ty: wgpu::BufferBindingType::Uniform,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("quad render global bind group layout"),
+        });
+
+        let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor{
+            label: Some("[quad renderer] globals"),
+            size: std::mem::size_of::<QuadDrawGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
             label: Some("quad render pipeline"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&globals_bind_group_layout, &bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -199,8 +233,15 @@ impl Renderer
             last_buffer_fill_len: 0,
             rect_index_buffer: batched_quad_index_buffer,
             rect_pipeline_binding_group_layout: bind_group_layout,
+            rect_pipeline_globals_binding_group_layout: globals_bind_group_layout,
+            rect_globals_buffer: globals_buffer,
             rect_pipeline_layout: pipeline_layout,
             rect_pipeline: pipeline,
+            globals: QuadDrawGlobals{
+                camera_translation: [0.0,0.0],
+                camera_rotation: [1.0,0.0],
+                camera_scale: [1.0,1.0],
+            },
         });
 
         Self{
@@ -280,12 +321,27 @@ impl Renderer
         let output = state.shared_ressources.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        state.shared_ressources.main_queue.write_buffer(&state.rect_globals_buffer, 0, bytemuck::cast_slice(&[state.globals]));
+
         let mut encoder = state.shared_ressources.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Rect Renderpass Encoder"),
         });
 
         {
-            let val = self.start_time.elapsed().unwrap().as_secs_f64();
+            let globals_bind_group = state.shared_ressources.device.create_bind_group(&wgpu::BindGroupDescriptor{
+                label: Some("[quad renderer] globals"),
+                layout: &state.rect_pipeline_globals_binding_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry{
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding{
+                            buffer: &state.rect_globals_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    }
+                ]
+            });
 
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -305,6 +361,8 @@ impl Renderer
                 depth_stencil_attachment: None,
             });
 
+            render_pass.set_bind_group(0, &globals_bind_group, &[]);
+
             render_pass.set_pipeline(&state.rect_pipeline);
 
             render_pass.set_index_buffer(
@@ -314,10 +372,10 @@ impl Renderer
 
             if state.last_buffer_fill_len > 0 {
                 for i in 0..state.last_buffer_index {
-                    render_pass.set_bind_group(0, &state.rect_draw_buffers[i].1, &[]);
+                    render_pass.set_bind_group(1, &state.rect_draw_buffers[i].1, &[]);
                     render_pass.draw_indexed(0..(QUADS_PER_BATCH*6) as u32, 0, 0..1);
                 }
-                render_pass.set_bind_group(0, &state.rect_draw_buffers[state.last_buffer_index].1, &[]);
+                render_pass.set_bind_group(1, &state.rect_draw_buffers[state.last_buffer_index].1, &[]);
                 render_pass.draw_indexed(0..(state.last_buffer_fill_len*6) as u32, 0, 0..1);
             }
         }

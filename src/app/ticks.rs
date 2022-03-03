@@ -44,6 +44,16 @@ async fn fixed_tick<T: User>(appdata: Arc<SharedAppData>, user: Arc<T>) {
         profiling::scope!("fixed_tick before user");
     }
 
+    {
+        let input_state_varstep = &mut*appdata.input_state_varstep.lock().await;
+        let input_state_fixedstep = &mut*appdata.input_state_fixedstep.lock().await;
+
+        for i in 0..512 {
+            input_state_fixedstep.key_states_old[i] = input_state_fixedstep.key_states[i];
+            input_state_fixedstep.key_states[i] = input_state_varstep.key_states[i];
+        }
+    }
+
     user.fixed_tick(appdata.clone(), fixed_data.clone()).await;
 }
 
