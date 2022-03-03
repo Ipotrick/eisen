@@ -56,14 +56,16 @@ impl AtomicWaiter {
 impl Future for AtomicWaiter {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.data.count.fetch_add(0, std::sync::atomic::Ordering::Acquire) == 0 {
-            return Poll::Ready(());
-        }
-        let mut waker = self.data.waker.lock().unwrap();
-        if waker.is_none() {
+        {
+            let mut waker = self.data.waker.lock().unwrap();
             *waker = Some(cx.waker().clone());
         }
-        Poll::Pending
+        
+        if self.data.count.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 

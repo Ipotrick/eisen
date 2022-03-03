@@ -3,8 +3,8 @@ pub type EntityVersion = u32;
 
 #[derive(Clone, Copy)]
 pub struct EntityHandle {
-    pub(crate) index: EntityIndex,
-    pub(crate) version: EntityVersion,
+    pub index: EntityIndex,
+    pub version: EntityVersion,
 }
 
 #[derive(Clone, Copy)]

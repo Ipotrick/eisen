@@ -4,8 +4,6 @@ pub mod util;
 pub mod app;
 pub mod rendering;
 
-pub mod dev;
-
 pub type Vf32x2 = cgmath::Vector2<f32>;
 pub type Vf32x3 = cgmath::Vector3<f32>;
 pub type Vf32x4 = cgmath::Vector4<f32>;
@@ -22,55 +20,47 @@ use app::*;
 #[cfg(test)]
 mod tests {
 
-    use futures::executor::block_on;
-
     #[allow(unused)]
     use crate::entity::{EntityComponentManager};
 
     use super::*;
 
-    #[derive(Clone,Default)]
-    struct Health(u32);
-    
-    impl entity::Component for Health {
-        type Storage = entity::DenseStore<Self>;
-    } 
-    
-    #[derive(Clone,Default)]
-    struct Pos(f32,f32);
-    
-    impl entity::Component for Pos {
-        type Storage = entity::LinearStore<Self>;
-    }
-    
-    #[derive(Clone,Default)]
-    struct Name(String);
-    
-    impl entity::Component for Name {
-        type Storage = entity::DenseStore<Self>;
-    }
-
-    #[test]
-    fn dev() {
-        let my_user = dev::MyUser{};
-        let app = Application::new(my_user);
-        app.run();
-    }
-
     #[test]
     fn ecm_par_iter_works() {
+
+        #[derive(Clone,Default)]
+        struct Health(u32);
+        
+        impl entity::Component for Health {
+            type Storage = entity::DenseStore<Self>;
+        } 
+        
+        #[derive(Clone,Default)]
+        struct Pos(f32,f32);
+        
+        impl entity::Component for Pos {
+            type Storage = entity::LinearStore<Self>;
+        }
+        
+        #[derive(Clone,Default)]
+        struct Name(String);
+        
+        impl entity::Component for Name {
+            type Storage = entity::DenseStore<Self>;
+        }
+
         let runtime = Arc::new(Runtime::new());
         let waiter = sync::AtomicWaiter::new();
         let dep = waiter.make_dependency();
 
         let rt_clone = runtime.clone();
-        let main_task = async{
+        let crate_task = async{
             let _d = dep;
             let runtime = rt_clone;
             let ecm = entity::EntityComponentManager::new();
 
-            get_components_mut!(manager: ecm; components: Health, Pos, Name => healths, positions, names);
-            get_entities_mut!(manager: ecm => entities);
+            get_components_mut!(ecm; Health, Pos, Name => healths, positions, names);
+            get_entities_mut!(ecm; entities);
     
             const N: usize = 100_000;
             for i in 0..N {
@@ -114,7 +104,7 @@ mod tests {
         };
 
 
-        runtime.spawn_prioritised(main_task, sync::task::Priority::VeryHigh);
+        runtime.spawn_prioritised(crate_task, sync::task::Priority::VeryHigh);
         block_on(waiter);
     }
 

@@ -41,21 +41,18 @@ thread_local! {
 
 #[allow(unused)]
 pub fn block_on<Out>(mut future: impl Future<Output = Out>) -> Out {
-
     LOCAL_BLOCK_ON_DATA.with(
         |ref_cell| {
             let local_block_data = ref_cell.borrow_mut();
             let waker = waker_ref(&local_block_data.waker);
             let context = &mut Context::from_waker(&*waker);
 
-            local_block_data.send.try_send(UnblockSignal{});
-
             loop {
-                let _ = local_block_data.recv.recv().unwrap();
                 let future = unsafe{ Pin::new_unchecked(&mut future)};
                 if let Poll::Ready(val) = future.poll(context) {
                     break val;
                 }
+                local_block_data.recv.recv().unwrap();
             }
         }
     )

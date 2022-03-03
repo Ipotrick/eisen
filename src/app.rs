@@ -1,6 +1,5 @@
 mod ticks;
 use std::thread::JoinHandle;
-use async_std::sync::Mutex;
 use ticks::*;
 pub use ticks::FixedData;
 
@@ -17,7 +16,8 @@ use crate::{entity::EntityComponentManager, sync::{Runtime, block_on}};
 
 //o------------ User Trait ---------------o
 
-pub trait User : Send + Sync {
+pub trait User : Send + Sync + Default
+{
     fn init(self: Arc<Self>, appdata: Arc<SharedAppData>);
     fn cleanup(self: Arc<Self>, appdata: Arc<SharedAppData>);
     fn vary_tick(self: Arc<Self>, appdata: Arc<SharedAppData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>;
@@ -31,6 +31,7 @@ pub struct SharedAppData {
     pub runtime: Runtime,
     pub ecm: EntityComponentManager,
     pub window: Window,
+    pub renderer: Renderer,
     pub(crate) min_vary_delta_time: AtomicU64,
     pub(crate) vary_delta_time: AtomicU64,
     pub(crate) fixed_delta_time: AtomicU64,
@@ -74,27 +75,23 @@ impl SharedAppData {
     }
 }
 
-//o--------- Main App Data ----------------o
-
-pub struct VaryAppData {
-    pub renderer: Renderer,
-}
-
 //o------------ Application ---------------o
 
 #[allow(unused)]
-pub struct Application {
+pub struct Application<T : User> 
+{
     meta: Arc<SharedAppData>,
-    main_data: Arc<Mutex<VaryAppData>>,
     event_loop: Option<EventLoop<()>>,
-    user: Arc<dyn User>,
+    user: Arc<T>,
     fixed_step_signal_thread: Option<JoinHandle<()>>,
     fixed_step_signal: (async_std::channel::Sender<FixedStepUpdateSignal>, async_std::channel::Receiver<FixedStepUpdateSignal>),
     last_frame_end: Instant,
 }
 
-impl Application {
-    pub fn new(user: impl User + 'static) -> Self {
+impl<T: User + 'static> Application<T> 
+{
+    pub fn new() -> Self 
+    {
         env_logger::init();
         let event_loop = EventLoop::new_any_thread();
         let window = WindowBuilder::new().build(&event_loop).unwrap();
@@ -105,20 +102,21 @@ impl Application {
                 runtime: Runtime::new(),
                 ecm: EntityComponentManager::new(),
                 window,
-                min_vary_delta_time: AtomicU64::from(10_000_000),
+                min_vary_delta_time: AtomicU64::from(1_000_000),
                 vary_delta_time: AtomicU64::from(0),
-                fixed_delta_time: AtomicU64::from(16_666_666),
+                fixed_delta_time: AtomicU64::from(1_000_000),
+                renderer,
             }),
-            main_data: Arc::new(Mutex::new(VaryAppData{renderer: renderer})),
             event_loop: Some(event_loop),
-            user: Arc::new(user),
+            user: Arc::new(T::default()),
             fixed_step_signal_thread: None,
             fixed_step_signal: async_std::channel::bounded(2),
             last_frame_end: Instant::now(),
         }
     }
 
-    pub fn run(mut self) {
+    pub fn run(mut self) 
+    {
         profiling::register_thread!("main thread");
         self.user.clone().init(self.meta.clone());
 
@@ -138,13 +136,13 @@ impl Application {
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Poll;
             match event {
-                Event::MainEventsCleared =>  self.on_main_events_cleared(control_flow),
+                Event::MainEventsCleared => self.on_main_events_cleared(control_flow),
                 Event::RedrawRequested(_) => { },
                 Event::WindowEvent{ ref event,  window_id, } if (window_id == self.meta.window.id()) => {
                     match event {
                         WindowEvent::CloseRequested                                                     => *control_flow = ControlFlow::Exit,
-                        WindowEvent::Resized(physical_size)                            => block_on(self.main_data.lock()).renderer.resize(*physical_size),
-                        WindowEvent::ScaleFactorChanged { new_inner_size, .. }     => block_on(self.main_data.lock()).renderer.resize(**new_inner_size),
+                        WindowEvent::Resized(physical_size)                            => block_on(self.meta.renderer.resize(*physical_size)),
+                        WindowEvent::ScaleFactorChanged { new_inner_size, .. }     => block_on(self.meta.renderer.resize(**new_inner_size)),
                         _ => { }
                     }
                 },
@@ -153,7 +151,8 @@ impl Application {
         });
     }
 
-    fn on_main_events_cleared(&mut self, control_flow: &mut ControlFlow) {
+    fn on_main_events_cleared(&mut self, control_flow: &mut ControlFlow) 
+    {
         profiling::scope!("MainEventsCleared");
         self.meta.window.request_redraw();
         if self.meta.end_program.load(Ordering::Relaxed) {
@@ -161,7 +160,7 @@ impl Application {
         } else {
             let waiter = AtomicWaiter::new();
             let dep = waiter.make_dependency();
-            let vary_future = vary_tick(self.main_data.clone(),self.meta.clone(), self.user.clone());
+            let vary_future = vary_tick(self.meta.clone(), self.user.clone());
             let vary_future = async move {
                 let _d = dep;
                 vary_future.await;
@@ -181,8 +180,10 @@ impl Application {
     }
 }
 
-impl Drop for Application {
-    fn drop(&mut self) {
+impl<T: User> Drop for Application<T>
+{
+    fn drop(&mut self) 
+    {
         self.user.clone().cleanup(self.meta.clone());
         self.meta.end_program.store(true, Ordering::Relaxed);
         let _ = self.fixed_step_signal.0.try_send(FixedStepUpdateSignal{});

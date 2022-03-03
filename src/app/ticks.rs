@@ -22,7 +22,7 @@ pub(crate) fn fixed_time_step_notify(meta: Arc<SharedAppData>, signal_snd: async
     }
 }
 
-pub(crate) async fn fixed_loop(signal: async_std::channel::Receiver<FixedStepUpdateSignal>, appdata: Arc<SharedAppData>, user: Arc<dyn User>) 
+pub(crate) async fn fixed_loop<T: User>(signal: async_std::channel::Receiver<FixedStepUpdateSignal>, appdata: Arc<SharedAppData>, user: Arc<T>) 
 {
     loop {
         let _ = signal.recv().await;
@@ -34,7 +34,7 @@ pub(crate) async fn fixed_loop(signal: async_std::channel::Receiver<FixedStepUpd
     println!("INFO:   ended fixed loop");
 }
 
-async fn fixed_tick(appdata: Arc<SharedAppData>, user: Arc<dyn User>) {
+async fn fixed_tick<T: User>(appdata: Arc<SharedAppData>, user: Arc<T>) {
     let fixed_data = Arc::new(FixedData{
         fixed_delta_time_nanos: appdata.get_fixed_delta_time_nanos(),
         fixed_delta_time_secs: appdata.get_fixed_delta_time_secs(),
@@ -47,14 +47,10 @@ async fn fixed_tick(appdata: Arc<SharedAppData>, user: Arc<dyn User>) {
     user.fixed_tick(appdata.clone(), fixed_data.clone()).await;
 }
 
-pub(crate) async fn vary_tick(maindata: Arc<Mutex<VaryAppData>>, appdata: Arc<SharedAppData>, user: Arc<dyn User>) {
+pub(crate) async fn vary_tick<T: User>(appdata: Arc<SharedAppData>, user: Arc<T>) {
     {
         profiling::scope!("vary_tick before user");
     }
-
     user.vary_tick(appdata.clone()).await;
-
-    let mut varydata = maindata.lock().await;
-
-    varydata.renderer.render().await.unwrap();
+    appdata.renderer.render().await.unwrap();
 }

@@ -1,36 +1,40 @@
 #![macro_use]
 
 #[allow(unused)]
-use crate::util::*;
+pub use crate::util::*;
+pub use crate::entity::component_storage::*;
 
 #[allow(unused)]
+#[macro_export]
 pub(crate) fn forget_lifetime_mut<'a, 'b, T>(reference: &'a mut T) -> &'b mut T {
     unsafe{std::mem::transmute::<&'a mut T, &'b mut T>(reference)}
 }
 
 #[allow(unused)]
+#[macro_export]
 pub(crate) fn forget_lifetime<'a, 'b, T>(reference: &'a T) -> &'b T {
     unsafe{std::mem::transmute::<&'a T, &'b T>(reference)}
 }
 
 #[allow(unused)]
+#[macro_export]
 macro_rules! expand_iteration {
     ($iter:expr, mut $store:expr $(, $($rest:tt)+)?) => {
-        expand_iteration!(
+        eisen::expand_iteration!(
             $iter.filter_map(|tup| {
                 let index = tup.0;
-                Some(tup.append(crate::entity::iteration::forget_lifetime_mut($store.get_mut(index)?)))
+                Some(tup.append(eisen::forget_lifetime_mut($store.get_mut(index)?)))
             })
             $(, $($rest)+)?
         )
     };
     
     ($iter:expr, not $store:expr $(, $($rest:tt)+)?) => {
-        expand_iteration!($iter.filter(|tup| !$store.has(tup.0)) $(, $($rest)+)?)
+        eisen::expand_iteration!($iter.filter(|tup| !$store.has(tup.0)) $(, $($rest)+)?)
     };
     
     ($iter:expr, $store:expr $(, $($rest:tt)+)?) => {
-        expand_iteration!(
+        eisen::expand_iteration!(
             $iter.filter_map(|tup| {
                 let index = tup.0;
                 Some(tup.append($store.get(index)?))
@@ -45,20 +49,21 @@ macro_rules! expand_iteration {
 }
 
 #[allow(unused)]
+#[macro_export]
 macro_rules! erase_lifetime_check {
     (mut $first:ident $(, $($rest:tt)+)?) => {
         let $first = crate::entity::iteration::forget_lifetime_mut($first);
-        $(erase_lifetime_check!($($rest)+))?
+        $(eisen::erase_lifetime_check!($($rest)+))?
     };
 
     (not $first:ident $(, $($rest:tt)+)?) => {
         let $first = crate::entity::iteration::forget_lifetime($first);
-        $(erase_lifetime_check!($($rest)+))?
+        $(eisen::erase_lifetime_check!($($rest)+))?
     };
 
     ($first:ident $(, $($rest:tt)+)?) => {
         let $first = crate::entity::iteration::forget_lifetime(&*$first);
-        $(erase_lifetime_check!($($rest)+))?
+        $(eisen::erase_lifetime_check!($($rest)+))?
     };
 }
 
@@ -68,17 +73,17 @@ macro_rules! parallel_over_entities {
     ($(note: $note:literal;)? runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: $first_store:ident $(,$($rest:tt)+)?) => {
         async { 
             let waiter = crate::sync::AtomicWaiter::new();
-            erase_lifetime_check!($first_store);
+            eisen::erase_lifetime_check!($first_store);
 
             $first_store.iter_entity_batch($batch_size)
             .for_each(|batch_iter|{
-                $(erase_lifetime_check!($($rest)+);)?
-                erase_lifetime_check!($entities);
+                $(eisen::erase_lifetime_check!($($rest)+);)?
+                eisen::erase_lifetime_check!($entities);
                 let dep = waiter.make_dependency();
                 let func = || { 
                     profiling::scope!("parallel_over_entities" $(,$note)?);
                     let _d = dep;
-                    expand_iteration!(batch_iter $(,$($rest)+)?)
+                    eisen::expand_iteration!(batch_iter $(,$($rest)+)?)
                         .map(|tup| {
                             let index = tup.0;
                             tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
@@ -96,17 +101,17 @@ macro_rules! parallel_over_entities {
     ($(note: $note:literal;)? runtime: $runtime:expr; batch_size: $batch_size:expr; closure: $closure:expr; entities: $entities:ident; stores: mut $first_store:ident $(,$($rest:tt)+)?) => {
         async {
             let waiter = crate::sync::AtomicWaiter::new();
-            erase_lifetime_check!(mut $first_store);
+            eisen::erase_lifetime_check!(mut $first_store);
 
             $first_store.iter_entity_mut_batch($batch_size)
                 .for_each(|batch_iter|{
-                    $(erase_lifetime_check!($($rest)+);)?
-                    erase_lifetime_check!($entities);
+                    $(eisen::erase_lifetime_check!($($rest)+);)?
+                    eisen::erase_lifetime_check!($entities);
                     let dep = waiter.make_dependency();
                     let func = move || { 
                         profiling::scope!("parallel_over_entities" $(,$note)?);
                         let _d = dep;
-                        expand_iteration!(batch_iter $(,$($rest)+)?)
+                        eisen::expand_iteration!(batch_iter $(,$($rest)+)?)
                             .map(|tup| {
                                 let index = tup.0;
                                 tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
@@ -126,30 +131,30 @@ macro_rules! parallel_over_entities {
 #[macro_export]
 macro_rules! iterate_over_entities {
     (entities: $entities:expr; stores: mut $first_store:expr $(,$($rest:tt)+)?) => { 
-        expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
+        eisen::expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
             .map(|tup|{
                 let index = tup.0;
-                tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
+                tup.replace_first(eisen::entity::EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
             })
     };
 
     (entities: $entities:expr; stores: $first_store:expr $(,$($rest:tt)+)?) => {
-        expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
+        eisen::expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
             .map(|tup| {
                 let index = tup.0;
-                tup.replace_first(EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
+                tup.replace_first(eisen::entity::EntityHandle{index: index, version: $entities.version_of(index).unwrap()})
             })
     };
     
     (stores: mut $first_store:expr $(,$($rest:tt)+)?) => { 
-        expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
+        eisen::expand_iteration!($first_store.iter_entity_mut() $(, $($rest)+)?)
             .map(|tup| {
                 tup.pop_front()
             })
     };
 
     (stores: $first_store:expr $(,$($rest:tt)+)?) => { 
-        expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
+        eisen::expand_iteration!($first_store.iter_entity() $(, $($rest)+)?)
             .map(|tup| {
                 tup.pop_front()
             })

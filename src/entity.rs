@@ -1,5 +1,3 @@
-#![macro_use]
-
 pub mod handle;
 pub mod entity_manager;
 pub mod component_storage;

@@ -8,15 +8,15 @@ use crate::entity::entity_manager::*;
 use crate::entity::component_storage::*;
 
 pub struct EntityComponentManager {
+    pub entities: Arc<RwLock<EntityManager>>,
     stores: RwLock<rustc_hash::FxHashMap<TypeId, Box<dyn ComponentStoreAccessor + Sync + Send>>>,
-    entities: Arc<RwLock<EntityManager>>,
 }
 
 impl Default for EntityComponentManager {
     fn default() -> Self {
         Self{
-            stores: RwLock::new(rustc_hash::FxHashMap::default()),
             entities: Arc::new(RwLock::new(EntityManager::new())),
+            stores: RwLock::new(rustc_hash::FxHashMap::default()),
         }
     }
 }
@@ -53,8 +53,8 @@ impl EntityComponentManager {
     }
 
     #[allow(unused)]
-    pub fn get_entities(&self) -> Arc<RwLock<EntityManager>> {
-        self.entities.clone()
+    pub fn get_entities(&self) -> &RwLock<EntityManager> {
+        &self.entities
     }
 
     #[allow(unused)]
@@ -93,11 +93,11 @@ impl EntityComponentManager {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_components_mut {    
-    (manager: $ecm:expr; components: $StoreType:ty $(,$($RestTypes:ty),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
+    ($ecm:expr; $StoreType:ty $(,$($RestTypes:ty),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
         let $name = $ecm.get_store::<$StoreType>().await;
         let mut $name = $name.write().await;
         let $name = &mut*$name;
-        $(get_components_mut!(manager: $ecm; components: $($RestTypes),+ => $($RestNames),+))?
+        $(eisen::get_components_mut!($ecm; $($RestTypes),+ => $($RestNames),+))?
     };
 }
 
@@ -108,11 +108,11 @@ macro_rules! get_components_mut {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_components {    
-    (manager: $ecm:expr; components: $StoreType:ty $(,$($RestTypes:tt),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
+    ($ecm:expr; $StoreType:ty $(,$($RestTypes:tt),+)? => $name:ident $(,$($RestNames:ident),+)?) => {
         let $name = $ecm.get_store::<$StoreType>().await;
         let $name = $name.read().await;
         let $name = &*$name;
-        $(get_components!(manager: $ecm; components: $($RestTypes),+ => $($RestNames),+))?
+        $(eisen::get_components!($ecm; $($RestTypes),+ => $($RestNames),+))?
     };
 }
 
@@ -123,7 +123,7 @@ macro_rules! get_components {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_entities {
-    (manager: $ecm:expr => $name:ident) => {
+    ($ecm:expr; $name:ident) => {
         let $name = $ecm.get_entities();
         let $name = $name.read().await;
         let $name = &*$name;
@@ -137,7 +137,7 @@ macro_rules! get_entities {
 #[allow(unused)]
 #[macro_export]
 macro_rules! get_entities_mut {
-    (manager: $ecm:expr => $name:ident) => {
+    ($ecm:expr; $name:ident) => {
         let $name = $ecm.get_entities();
         let mut $name = $name.write().await;
         let $name = &mut*$name;

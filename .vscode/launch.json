@@ -7,10 +7,33 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug",
-            "program": "${workspaceFolder}/<your program>",
+            "name": "Debug unit tests in library 'eisen'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib=eisen",
+                    "--package=eisen"
+                ],
+                "filter": {
+                    "name": "eisen",
+                    "kind": "lib"
+                }
+            },
             "args": [],
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Run Test Debugger",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/buggin-70708b3916187eeb.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": true,
+            "preLaunchTask": "cargo test build",
         }
     ]
 }

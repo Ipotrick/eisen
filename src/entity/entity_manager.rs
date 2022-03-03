@@ -21,7 +21,7 @@ impl EntityManager {
     }
 
     #[allow(unused)]
-    pub(crate) fn version_of(&self, index: EntityIndex) -> Option<EntityVersion> {
+    pub fn version_of(&self, index: EntityIndex) -> Option<EntityVersion> {
         if self.exists_index(index) {
             Some(self.entity_slots[index as usize].version)
         } else {
@@ -55,7 +55,7 @@ impl EntityManager {
     }
 
     #[allow(unused)]
-    pub fn add<C: Component, Store: ComponentStore<C>>(&mut self, store: &mut Store, value: C, entity: EntityHandle) {
+    pub fn add<C: Component, Store: ComponentStore<C>>(&self, store: &mut Store, value: C, entity: EntityHandle) {
         assert!(self.exists(entity));
         store.add(entity.index, value);
     }
@@ -67,7 +67,7 @@ impl EntityManager {
     }
 
     #[allow(unused)]
-    pub fn has<C: Component, Store: ComponentStore<C> + GenericComponentStore>(&mut self, store: &Store, entity: EntityHandle) -> bool {
+    pub fn has<C: Component, Store: ComponentStore<C> + GenericComponentStore>(&self, store: &Store, entity: EntityHandle) -> bool {
         assert!(self.exists(entity));
         store.has(entity.index)
     }
@@ -79,7 +79,7 @@ impl EntityManager {
     }
 
     #[allow(unused)]
-    pub fn get_mut<'c, C: Component, Store: ComponentStore<C> + GenericComponentStore>(&mut self, store: &'c mut Store, entity: EntityHandle) -> Option<&'c mut C> {
+    pub fn get_mut<'c, C: Component, Store: ComponentStore<C> + GenericComponentStore>(&self, store: &'c mut Store, entity: EntityHandle) -> Option<&'c mut C> {
         assert!(self.exists(entity));
         store.get_mut(entity.index)
     }

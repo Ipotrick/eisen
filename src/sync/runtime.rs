@@ -1,4 +1,5 @@
 pub use std::{cell::RefCell, pin::Pin, task::Waker};
+use crossbeam_channel::RecvTimeoutError;
 pub use futures::{Future, FutureExt, task::{waker_ref}};
 pub use smallbox::SmallBox;
 use std::{sync::atomic::{AtomicU64, Ordering}};
@@ -16,10 +17,6 @@ pub use {
 };
 
 use super::task::*;
-
-pub(crate) enum RuntimeInfo {
-    WakeUp
-}
 
 pub(crate) struct RuntimeMeta {
     worker_count: AtomicU64,
@@ -66,70 +63,51 @@ fn process_task(meta: &Arc<RuntimeMeta>, execution_sender: &crossbeam_channel::S
 #[allow(unused)]
 fn worker(meta: Arc<RuntimeMeta>, worker_index: usize) {
     
-    // main worker loop
+    // crate worker loop
     'outer: while !meta.end_runtime.load(Ordering::Relaxed) || meta.open_tasks.load(Ordering::Acquire) > 0 {
         // if there are no tasks directly available, we sleep and wake up to execute the next available Order from any queue
-        
-        let (mut sender, mut order) = {
-            crossbeam_channel::select! {
-                recv(meta.execution_reciever_low) -> order => (&meta.execution_sender_low, order.unwrap()),
-                recv(meta.execution_reciever_normal) -> order => (&meta.execution_sender_normal, order.unwrap()),
-                recv(meta.execution_reciever_high) -> order => (&meta.execution_sender_high, order.unwrap()),
-                recv(meta.execution_reciever_very_high) -> order => (&meta.execution_sender_very_high, order.unwrap()),
-                recv(meta.signal_reciever) -> info => {
-                    match info.unwrap() {
-                        RuntimeInfo::WakeUp => {
-                            continue 'outer;
-                        }
-                    }
-                },
+
+        match meta.signal_reciever.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(_) => (),
+            Err(err) => match err {
+                RecvTimeoutError::Timeout => (),
+                RecvTimeoutError::Disconnected => panic!(),
             }
-        };
+        }
 
-        let mut order = Some(order);
+        let mut order = None;
+        let mut sender = None;
 
-        'inner: while order.is_some() {
+        'inner2: loop {
+            if let Ok(o) = meta.execution_reciever_very_high.try_recv() {
+                order = Some(o);
+                sender = Some(& meta.execution_sender_very_high);
+            } else if let Ok(o) = meta.execution_reciever_high.try_recv() {
+                order = Some(o);
+                sender = Some(& meta.execution_sender_high);
+            } else if let Ok(o) = meta.execution_reciever_normal.try_recv() {
+                order = Some(o);
+                sender = Some(& meta.execution_sender_normal);
+            } else if let Ok(o) = meta.execution_reciever_low.try_recv() {
+                order = Some(o);
+                sender = Some(& meta.execution_sender_low);
+            }
+    
+            if order.is_none() {
+                continue 'outer;
+            }
+
             {
                 profiling::scope!("worker does work");
                 match order.take().unwrap() {
                     ExecutionOrder::ExecuteTask(task) => {
-                        process_task(&meta, sender, task);
+                        process_task(&meta, sender.unwrap(), task);
                     },
                     ExecutionOrder::ExecuteClosure(mut closure) => {
                         closure();
                     },
                 };
             };
-
-            profiling::scope!("worker pick new work");
-
-            // try to find new work:
-            if let Ok(new_order) = meta.execution_reciever_very_high.try_recv() {
-                order = Some(new_order);
-                sender = &meta.execution_sender_very_high;
-            }
-            else if let Ok(new_order) = meta.execution_reciever_high.try_recv() {
-                order = Some(new_order);
-                sender = &meta.execution_sender_high;
-            }
-            else if let Ok(new_order) = meta.execution_reciever_normal.try_recv() {
-                order = Some(new_order);
-                sender = &meta.execution_sender_normal;
-            }
-            else if let Ok(new_order) = meta.execution_reciever_low.try_recv() {
-                order = Some(new_order);
-                sender = &meta.execution_sender_low;
-            } 
-
-            YIELD_INFO.with(|info| {
-                if let Some(yielder) = info.borrow_mut().yield_task.take() {
-                    if order.is_some() {
-                        yielder.wake();
-                    } else {
-                        order = Some(ExecutionOrder::ExecuteTask(yielder));
-                    }
-                }
-            });
         }
     }
     meta.worker_count.fetch_sub(1, Ordering::Relaxed);
@@ -211,13 +189,15 @@ impl Runtime {
 
         let task_arc = Arc::new(Task{
             future: Mutex::new(Box::pin(future)),
-            execution_sender: sender.clone(),
+            execution_queue: sender.clone(),
+            notify_signal: self.meta.signal_sender.clone(),
             priority: priority,
         });
 
         self.meta.open_tasks.fetch_add(1, Ordering::AcqRel);
 
         sender.send(ExecutionOrder::ExecuteTask(task_arc)).unwrap();
+        self.meta.signal_sender.send(RuntimeInfo::WakeUp);
     }
 
     /**
@@ -244,6 +224,7 @@ impl Runtime {
             Priority::High => self.meta.execution_sender_high.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap(),
             Priority::VeryHigh => self.meta.execution_sender_very_high.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap(),
         }
+        self.meta.signal_sender.send(RuntimeInfo::WakeUp);
     }
     
     /**
@@ -254,7 +235,7 @@ impl Runtime {
      */
     #[allow(unused)]
     pub fn exec(&self, closure: impl FnOnce() + Send + 'static) {
-        self.meta.execution_sender_normal.send(ExecutionOrder::ExecuteClosure(Box::new(closure))).unwrap();
+        self.exec_prioritised(closure, Priority::Normal);
     }
 
     /**
