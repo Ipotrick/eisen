@@ -2,7 +2,6 @@ mod ticks;
 use std::thread::JoinHandle;
 use async_std::sync::Mutex;
 use ticks::*;
-pub use ticks::FixedData;
 use winit::event::VirtualKeyCode;
 
 use std::time::{Duration, Instant};
@@ -20,10 +19,10 @@ use crate::{entity::EntityComponentManager, sync::{Runtime, block_on}};
 
 pub trait User : Send + Sync + Default
 {
-    fn init(self: Arc<Self>, appdata: Arc<SharedAppData>);
-    fn cleanup(self: Arc<Self>, appdata: Arc<SharedAppData>);
-    fn vary_tick(self: Arc<Self>, appdata: Arc<SharedAppData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>;
-    fn fixed_tick(self: Arc<Self>, appdata: Arc<SharedAppData>, fixed_data: Arc<FixedData>)-> Pin<Box<dyn Future<Output=()> + Send + Sync>>;
+    fn init(self: Arc<Self>, shared_data: Arc<SharedAppData>, fixed_step_data: Arc<FixedStepData>, variable_step_data: Arc<VariableStepData>);
+    fn cleanup(self: Arc<Self>, shared_data: Arc<SharedAppData>);
+    fn fixed_step(self: Arc<Self>, shared_data: Arc<SharedAppData>, fixed_step_data: Arc<FixedStepData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>;
+    fn varaible_step(self: Arc<Self>, shared_data: Arc<SharedAppData>, variable_step_data: Arc<VariableStepData>) -> Pin<Box<dyn Future<Output=()> + Send + Sync>>;
 }
 
 //o------------ App Data ---------------o
@@ -31,91 +30,80 @@ pub trait User : Send + Sync + Default
 pub struct SharedAppData {
     pub end_program: AtomicBool,
     pub runtime: Runtime,
-    pub ecm: EntityComponentManager,
     pub window: Window,
-    pub renderer: Renderer,
     pub(crate) min_vary_delta_time: AtomicU64,
-    pub(crate) vary_delta_time: AtomicU64,
+}
+
+pub struct FixedStepData {
+    pub(crate) input_state: Mutex<InputState>,
+    pub ecm: EntityComponentManager,
     pub(crate) fixed_delta_time: AtomicU64,
-    pub(crate) input_state_varstep: Mutex<InputState>,
-    pub(crate) input_state_fixedstep: Mutex<InputState>,
+}
+
+pub struct VariableStepData {
+    pub(crate) input_state_backbuffer: Mutex<InputState>,
+    pub(crate) input_state_frontbuffer: Mutex<InputState>,
+    pub renderer: Renderer,
+    pub(crate) vary_delta_time: AtomicU64,
 }
 
 impl SharedAppData {
-    pub fn get_fixed_delta_time_nanos(&self) -> u64 {
-        self.fixed_delta_time.load(Ordering::Relaxed)
-    }
-
-    pub fn get_fixed_delta_time_secs(&self) -> f32 {
-        self.fixed_delta_time.load(Ordering::Relaxed) as f32 * 0.00_000_000_1
-    }
-
-    pub fn update_fixed_delta_time(&self, val: u64) {
-        self.fixed_delta_time.store(val, Ordering::Relaxed);
-    }
-
-    pub fn get_min_delta_time_nanos(&self) -> u64 {
-        self.min_vary_delta_time.load(Ordering::Relaxed)
-    }
-
-    pub fn get_min_delta_time_secs(&self) -> f32 {
-        self.min_vary_delta_time.load(Ordering::Relaxed) as f32 * 0.00_000_000_1
-    }
-
-    pub fn update_min_delta_time(&self, val: u64) {
-        self.min_vary_delta_time.store(val, Ordering::Relaxed);
-    }
-    
-    pub fn get_prev_frame_delta_time_nanos(&self) -> u64 {
-        self.vary_delta_time.load(Ordering::Relaxed)
-    }
-
-    pub fn get_prev_frame_delta_time_secs(&self) -> f32 {
-        self.vary_delta_time.load(Ordering::Relaxed) as f32 * 0.00_000_000_1
-    }
-
     pub fn end(&self) {
         self.end_program.store(true, Ordering::Relaxed);
     }
-    
-    pub async fn key_pressed_varstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_varstep.lock().await;
+}
+
+impl FixedStepData {
+    pub async fn key_pressed(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state.lock().await;
         input_state.key_states[key as usize]
     }
 
-    pub async fn key_released_varstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_varstep.lock().await;
+    pub async fn key_released(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state.lock().await;
         !input_state.key_states[key as usize]
     }
 
-    pub async fn key_just_pressed_varstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_varstep.lock().await;
+    pub async fn key_just_pressed(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state.lock().await;
         input_state.key_states[key as usize] && !input_state.key_states_old[key as usize]
     }
 
-    pub async fn key_just_released_varstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_varstep.lock().await;
+    pub async fn key_just_released(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state.lock().await;
         !input_state.key_states[key as usize] && input_state.key_states_old[key as usize]
     }
 
-    pub async fn key_pressed_fixedstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_fixedstep.lock().await;
+    pub fn get_delta_time(&self) -> std::time::Duration {
+        let dt = self.fixed_delta_time.load(std::sync::atomic::Ordering::Relaxed);
+        std::time::Duration::from_nanos(dt)
+    }
+}
+
+impl VariableStepData {
+    pub async fn key_pressed(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_backbuffer.lock().await;
         input_state.key_states[key as usize]
     }
 
-    pub async fn key_released_fixedstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_fixedstep.lock().await;
+    pub async fn key_released(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_backbuffer.lock().await;
         !input_state.key_states[key as usize]
     }
 
-    pub async fn key_just_pressed_fixedstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_fixedstep.lock().await;
+    pub async fn key_just_pressed(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_backbuffer.lock().await;
         input_state.key_states[key as usize] && !input_state.key_states_old[key as usize]
     }
 
-    pub async fn key_just_released_fixedstep(&self, key: VirtualKeyCode) -> bool {
-        let input_state = &mut*self.input_state_fixedstep.lock().await;
+    pub async fn key_just_released(&self, key: VirtualKeyCode) -> bool {
+        let input_state = &mut*self.input_state_backbuffer.lock().await;
         !input_state.key_states[key as usize] && input_state.key_states_old[key as usize]
+    }
+
+    pub fn get_delta_time(&self) -> std::time::Duration {
+        let dt = self.vary_delta_time.load(std::sync::atomic::Ordering::Relaxed);
+        std::time::Duration::from_nanos(dt)
     }
 }
 
@@ -147,6 +135,8 @@ impl Default for InputState {
 pub struct Application<T : User> 
 {
     pub(crate) shared_data: Arc<SharedAppData>,
+    pub(crate) fixed_step_data: Arc<FixedStepData>,
+    pub(crate) variable_step_data: Arc<VariableStepData>,
     event_loop: Option<EventLoop<()>>,
     user: Arc<T>,
     fixed_step_signal_thread: Option<JoinHandle<()>>,
@@ -167,38 +157,50 @@ impl<T: User + 'static> Application<T>
             shared_data: Arc::new(SharedAppData{
                 end_program: AtomicBool::new(false),
                 runtime: Runtime::new(),
-                ecm: EntityComponentManager::new(),
                 window,
-                min_vary_delta_time: AtomicU64::from(100_000_000),
-                vary_delta_time: AtomicU64::from(0),
-                fixed_delta_time: AtomicU64::from(1_000_000),
-                renderer,
-                input_state_varstep: Mutex::new(InputState::default()),
-                input_state_fixedstep: Mutex::new(InputState::default()),
+                min_vary_delta_time: AtomicU64::from(1_000_000),
+            }),
+            fixed_step_data: Arc::new(FixedStepData{
+                ecm: EntityComponentManager::new(),
+                input_state: Mutex::new(InputState::default()),
+                fixed_delta_time: AtomicU64::from(33_000_000),
             }),
             event_loop: Some(event_loop),
             user: Arc::new(T::default()),
             fixed_step_signal_thread: None,
             fixed_step_signal: async_std::channel::bounded(2),
             last_frame_end: Instant::now(),
+            variable_step_data: Arc::new(VariableStepData{
+                input_state_backbuffer: Mutex::new(InputState::default()),
+                input_state_frontbuffer: Mutex::new(InputState::default()),
+                renderer,
+                vary_delta_time: AtomicU64::from(0),
+            }),
         }
     }
 
     pub fn run(mut self) 
     {
         profiling::register_thread!("main thread");
-        self.user.clone().init(self.shared_data.clone());
+        self.user.clone().init(self.shared_data.clone(), self.fixed_step_data.clone(), self.variable_step_data.clone());
 
         let event_loop = self.event_loop.take().unwrap();
 
-        self.shared_data.runtime.spawn_prioritised(fixed_loop(self.fixed_step_signal.1.clone(), self.shared_data.clone(), self.user.clone()), crate::sync::task::Priority::VeryHigh);
+        self.shared_data.runtime.spawn_prioritised(fixed_loop(
+            self.fixed_step_signal.1.clone(), 
+            self.shared_data.clone(), 
+            self.fixed_step_data.clone(),
+            self.variable_step_data.clone(),
+            self.user.clone()
+        ), crate::sync::task::Priority::VeryHigh);
 
         let meta_clone = self.shared_data.clone();
+        let fixed_step_data_clone = self.fixed_step_data.clone();
         let signal_snd = self.fixed_step_signal.0.clone();
         self.fixed_step_signal_thread = Some(
             std::thread::Builder::new()
                 .name("fixed time step notify thread".into())
-                .spawn(||{fixed_time_step_notify(meta_clone, signal_snd)})
+                .spawn(||{fixed_time_step_notify(meta_clone, fixed_step_data_clone, signal_snd)})
                 .unwrap()
         ); 
 
@@ -210,17 +212,13 @@ impl<T: User + 'static> Application<T>
                 Event::WindowEvent{ ref event,  window_id, } if (window_id == self.shared_data.window.id()) => {
                     match event {
                         WindowEvent::CloseRequested                                                     => *control_flow = ControlFlow::Exit,
-                        WindowEvent::Resized(physical_size)                            => block_on(self.shared_data.renderer.resize(*physical_size)),
-                        WindowEvent::ScaleFactorChanged { new_inner_size, .. }     => block_on(self.shared_data.renderer.resize(**new_inner_size)),
+                        WindowEvent::Resized(physical_size)                            => block_on(self.variable_step_data.renderer.resize(*physical_size)),
+                        WindowEvent::ScaleFactorChanged { new_inner_size, .. }     => block_on(self.variable_step_data.renderer.resize(**new_inner_size)),
                         WindowEvent::KeyboardInput{device_id,input,is_synthetic} => {
                             let index = input.virtual_keycode.unwrap() as usize;
-                            let in_state = &mut*spin_on!(self.shared_data.input_state_varstep.try_lock());
+                            let in_state = &mut*spin_on!(self.variable_step_data.input_state_backbuffer.try_lock());
 
-                            in_state.key_states_old[index] = in_state.key_states[index];
-                            in_state.key_states[index] = match input.state { 
-                                winit::event::ElementState::Pressed => true, 
-                                winit::event::ElementState::Released => false 
-                            };
+                            in_state.key_states[index] = input.state == winit::event::ElementState::Pressed;
                         },
                         _ => { }
                     }
@@ -237,10 +235,9 @@ impl<T: User + 'static> Application<T>
         if self.shared_data.end_program.load(Ordering::Relaxed) {
             *control_flow = ControlFlow::Exit
         } else {
-
             let waiter = AtomicWaiter::new();
             let dep = waiter.make_dependency();
-            let vary_future = vary_tick(self.shared_data.clone(), self.user.clone());
+            let vary_future = vary_tick(self.shared_data.clone(), self.variable_step_data.clone(), self.user.clone());
             let vary_future = async move {
                 let _d = dep;
                 vary_future.await;
@@ -248,10 +245,10 @@ impl<T: User + 'static> Application<T>
 
             self.shared_data.runtime.spawn_prioritised(vary_future, crate::sync::task::Priority::VeryHigh);
 
-            let clamped_time_taken = self.last_frame_end.elapsed().as_nanos().clamp(0, self.shared_data.get_min_delta_time_nanos() as u128) as u64;
-            let left_time = self.shared_data.get_min_delta_time_nanos() - clamped_time_taken;
+            let clamped_time_taken = self.last_frame_end.elapsed().clamp(std::time::Duration::from_micros(0), self.variable_step_data.get_delta_time());
+            let left_time = self.variable_step_data.get_delta_time() - clamped_time_taken;
 
-            spin_sleep::sleep(Duration::from_nanos(left_time));
+            spin_sleep::sleep(left_time);
 
             block_on(waiter);
             profiling::finish_frame!();
